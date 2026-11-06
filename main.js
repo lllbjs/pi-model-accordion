@@ -23,6 +23,9 @@ const COPY_CHANNEL = "modelCatalog.copyProviderEntry";
 const OPEN_VIEW_METHOD = "modelCatalog.openView";
 const REFRESH_METHOD = "modelCatalog.refresh";
 const PICKER_FOLD_METHOD = "modelCatalog.pickerFold";
+const CREATE_KEY_CHANNEL = "modelCatalog.createKey";
+const COPY_KEY_CHANNEL = "modelCatalog.copyKey";
+const DEFAULT_KEY_API_BASE = "http://127.0.0.1:9822";
 const TICK_MS = 60_000;
 const DEFAULT_AUTO_REFRESH_MINUTES = 10;
 const DEFAULT_PORTS = [1234, 3000, 5000, 8000, 8080, 8081, 8787, 8790, 9000, 11434];
@@ -147,6 +150,7 @@ async function readSettings() {
     probeTimeoutMs: clampTimeout(raw.probeTimeoutMs),
     foldPickerProviders: raw.foldPickerProviders !== false,
     pickerFoldCollapsedByDefault: raw.pickerFoldCollapsedByDefault !== false,
+    keyApiBase: normalizeBase(raw.keyApiBase || DEFAULT_KEY_API_BASE) || DEFAULT_KEY_API_BASE,
   };
 }
 
@@ -236,8 +240,22 @@ async function probeGateway(candidate, timeoutMs) {
       timeoutMs,
     });
     if (response.status === 401 || response.status === 403) {
-      // A gateway that demands a key is a discovery result, not a dead port.
-      result = { ...candidate, ok: false, needsKey: true, error: null, models: [] };
+      // A gateway that demands a key is a discovery result, not a dead port —
+      // unless the view already minted a key for it: then ask again with it.
+      const minted = keyForBaseUrl(candidate.baseUrl);
+      let answered = null;
+      if (minted) {
+        const authorized = await pi.net.fetch({
+          url: `${candidate.baseUrl}/models`,
+          method: "GET",
+          timeoutMs,
+          headers: { authorization: `Bearer ${minted}` },
+        });
+        if (authorized.status === 200) answered = parseModelList(authorized.bodyText);
+      }
+      result = answered
+        ? { ...candidate, ok: true, needsKey: false, error: null, models: answered }
+        : { ...candidate, ok: false, needsKey: true, error: null, models: [] };
     } else if (response.status !== 200) {
       result = {
         ...candidate,
@@ -494,6 +512,79 @@ function providerEntry(label, baseUrl) {
   );
 }
 
+/**
+ * Where each provider's key lives in the DaddySuite / buddy-switch ledger.
+ * `POST <keyApiBase>/api/<namespace>/keys` with `{name, region}` returns the
+ * plaintext key once; the ledger keeps only a hash afterwards.
+ */
+const KEY_TARGETS = [
+  { providerId: "workbuddy-cn", namespace: "gateway", baseUrl: "http://127.0.0.1:57891/v1", region: "cn", name: "pi-workbuddy-\u56fd\u5185\u7248" },
+  { providerId: "workbuddy-ai", namespace: "gateway", baseUrl: "http://127.0.0.1:57891/v1", region: "global", name: "pi-workbuddy-\u56fd\u9645\u7248" },
+  { providerId: "trae-cn", namespace: "trae/gateway", baseUrl: "http://127.0.0.1:7864/v1", region: "cn", name: "pi-trae-\u56fd\u5185\u7248" },
+  { providerId: "trae-intl", namespace: "trae/gateway", baseUrl: "http://127.0.0.1:7864/v1", region: "global", name: "pi-trae-\u56fd\u9645\u7248" },
+  { providerId: "qoder-cn", namespace: "qoder/gateway", baseUrl: "http://127.0.0.1:57895/v1", region: "cn", name: "pi-qoder-\u56fd\u5185\u7248" },
+  { providerId: "qoder-intl", namespace: "qoder/gateway", baseUrl: "http://127.0.0.1:57895/v1", region: "global", name: "pi-qoder-\u56fd\u9645\u7248" },
+  { providerId: "kuku-gateway", namespace: "unified-gateway", baseUrl: "http://127.0.0.1:57896/v1", region: "cn", name: "pi-\u5e93\u5e93" },
+  { providerId: "raccoon-gateway", namespace: "unified-gateway", baseUrl: "http://127.0.0.1:57898/v1", region: "cn", name: "pi-\u6d63\u718a" },
+];
+
+/** Plaintext keys minted in this session — memory only, never persisted. */
+const createdKeys = new Map();
+
+/** The key the view minted for a gateway address, if any (two providers can share one). */
+function keyForBaseUrl(baseUrl) {
+  const wanted = normalizeBase(baseUrl);
+  for (const target of KEY_TARGETS) {
+    if (wanted && normalizeBase(target.baseUrl) === wanted && createdKeys.has(target.providerId)) {
+      return createdKeys.get(target.providerId);
+    }
+  }
+  return null;
+}
+
+function keyTarget(providerId) {
+  const wanted = String(providerId ?? "");
+  return KEY_TARGETS.find((target) => target.providerId === wanted) ?? null;
+}
+
+/** Create one ledger key; the plaintext is returned to the caller once. */
+async function createKey(settings, payload) {
+  const target = keyTarget(payload?.providerId);
+  if (!target) {
+    throw Object.assign(new Error(`Model Catalog: unknown key target: ${String(payload?.providerId)}`), {
+      code: "MODEL_CATALOG_UNKNOWN_KEY_TARGET",
+    });
+  }
+  const name = String(payload?.name ?? "").trim() || target.name;
+  const response = await pi.net.fetch({
+    url: `${settings.keyApiBase}/api/${target.namespace}/keys`,
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name, region: target.region }),
+    timeoutMs: settings.probeTimeoutMs,
+  });
+  let body;
+  try {
+    body = JSON.parse(response.bodyText);
+  } catch {
+    throw new Error(`HTTP ${response.status}: the ledger did not answer with JSON`);
+  }
+  if (body?.ok === false || typeof body?.key !== "string" || body.key === "") {
+    throw new Error(String(body?.error ?? `HTTP ${response.status}: no key in the ledger reply`));
+  }
+  createdKeys.set(target.providerId, body.key);
+  // DaddySuite hands the plaintext back exactly once — copy it right away.
+  await pi.clipboard.writeText(body.key);
+  return {
+    ok: true,
+    providerId: target.providerId,
+    name,
+    region: target.region,
+    key: body.key,
+    copied: true,
+  };
+}
+
 async function report() {
   return {
     models: snapshot.models,
@@ -506,6 +597,8 @@ async function report() {
     updatedAt: snapshot.updatedAt,
     refreshing: inFlight !== null,
     settings: await readSettings(),
+    keyTargets: KEY_TARGETS.map(({ providerId, region, name }) => ({ providerId, region, name })),
+    created: [...createdKeys.keys()],
   };
 }
 
@@ -604,6 +697,11 @@ module.exports = {
     if (channel === REFRESH_CHANNEL) {
       await pull("view");
       return report();
+    }
+    if (channel === CREATE_KEY_CHANNEL) return createKey(await readSettings(), payload);
+    if (channel === COPY_KEY_CHANNEL) {
+      await pi.clipboard.writeText(String(payload?.key ?? ""));
+      return { ok: true };
     }
     if (channel === COPY_CHANNEL) {
       const baseUrl = normalizeBase(payload?.baseUrl);

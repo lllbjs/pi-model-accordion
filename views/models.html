@@ -638,6 +638,92 @@
         return node;
       }
 
+      const KEY_COPY = {
+        "zh-CN": {
+          title: "API \u5bc6\u94a5",
+          hint: (n) => `\u901a\u8fc7 DaddySuite \u5bc6\u94a5\u53f0\u8d26\u521b\u5efa\uff0c\u540d\u5b57\u5f62\u5982 pi-workbuddy-\u56fd\u5185\u7248\uff08\u5171 ${n} \u6761\uff09\u3002`,
+          create: "\u521b\u5efa",
+          copy: "\u590d\u5236",
+          copied: "\u5df2\u590d\u5236",
+          created: (name) => `\u5df2\u521b\u5efa ${name}\uff0c\u5e76\u5df2\u81ea\u52a8\u590d\u5236\u5230\u526a\u8d34\u677f\uff1b\u5230 \u8bbe\u7f6e \u2192 \u6a21\u578b \u91cc\u7c98\u8d34\u7ed9\u5bf9\u5e94 provider\u3002`,
+          failed: (why) => `\u521b\u5efa\u5931\u8d25\uff1a${why}`,
+          note: "\u63d2\u4ef6\u4e0d\u80fd\u5199\u5bbf\u4e3b\u7684\u5bc6\u94a5\u69fd\uff0c\u6700\u540e\u4e00\u6b65\u4ecd\u9700\u4f60\u7c98\u8d34\uff1b\u91cd\u590d\u70b9\u300c\u521b\u5efa\u300d\u4f1a\u5efa\u51fa\u540c\u540d\u7684\u65b0\u5bc6\u94a5\u3002",
+        },
+        "zh-TW": {
+          title: "API \u91d1\u9470",
+          hint: (n) => `\u900f\u904e DaddySuite \u91d1\u9470\u53f0\u5e33\u5efa\u7acb\uff0c\u540d\u7a31\u5f62\u5982 pi-workbuddy-\u570b\u5167\u7248\uff08\u5171 ${n} \u689d\uff09\u3002`,
+          create: "\u5efa\u7acb",
+          copy: "\u8907\u88fd",
+          copied: "\u5df2\u8907\u88fd",
+          created: (name) => `\u5df2\u5efa\u7acb ${name}\uff0c\u8907\u88fd\u5f8c\u5230 \u8a2d\u5b9a \u2192 \u6a21\u578b \u88e1\u8cbc\u4e0a\u5c0d\u61c9 provider\u3002`,
+          failed: (why) => `\u5efa\u7acb\u5931\u6557\uff1a${why}`,
+          note: "\u5916\u639b\u4e0d\u80fd\u5beb\u5bbf\u4e3b\u7684\u91d1\u9470\u69fd\uff0c\u6700\u5f8c\u4e00\u6b65\u4ecd\u9700\u4f60\u8cbc\u4e0a\uff1b\u91cd\u8907\u9ede\u300c\u5efa\u7acb\u300d\u6703\u5efa\u51fa\u540c\u540d\u7684\u65b0\u91d1\u9470\u3002",
+        },
+        en: {
+          title: "API keys",
+          hint: (n) => `Created through the DaddySuite key ledger, named like pi-workbuddy-cn (${n} targets).`,
+          create: "Create",
+          copy: "Copy",
+          copied: "Copied",
+          created: (name) => `Created ${name}. Copy it and paste it into the matching provider in Settings \u2192 Models.`,
+          failed: (why) => `Create failed: ${why}`,
+          note: "A plugin cannot write the host's key slot, so the last step is still a paste; clicking Create again mints another key with the same name.",
+        },
+      };
+
+      function keyCopy() {
+        const tag = String(document.documentElement.lang || navigator.language || "en");
+        if (tag === "zh-TW" || tag === "zh-HK" || tag.startsWith("zh-Hant")) return KEY_COPY["zh-TW"];
+        if (tag.startsWith("zh")) return KEY_COPY["zh-CN"];
+        return KEY_COPY.en;
+      }
+
+      function keySection() {
+        const K = keyCopy();
+        const targets = state.keyTargets ?? [];
+        const node = document.createElement("section");
+        const heading = document.createElement("h2");
+        heading.textContent = K.title;
+        node.append(heading);
+        node.append(text(K.hint(targets.length), "section-hint"));
+        for (const target of targets) {
+          const row = document.createElement("div");
+          row.className = "model";
+          row.append(text(target.name, "model-label"));
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = K.create;
+          button.addEventListener("click", async () => {
+            button.disabled = true;
+            try {
+              const created = await bridge.invoke("modelCatalog.createKey", {
+                providerId: target.providerId,
+              });
+              row.append(text(K.created(created.name), "section-hint"));
+              const copyButton = document.createElement("button");
+              copyButton.type = "button";
+              copyButton.textContent = K.copy;
+              copyButton.addEventListener("click", async () => {
+                await bridge.invoke("modelCatalog.copyKey", { key: created.key });
+                copyButton.textContent = K.copied;
+              });
+              row.append(copyButton);
+              const code = document.createElement("code");
+              code.textContent = created.key;
+              row.append(code);
+            } catch (error) {
+              row.append(text(K.failed(error?.message ?? String(error)), "group-error"));
+            } finally {
+              button.disabled = false;
+            }
+          });
+          row.append(button);
+          node.append(row);
+        }
+        node.append(text(K.note, "section-hint"));
+        return node;
+      }
+
       function render() {
         document.documentElement.lang = state.locale;
         $("title").textContent = T.title;
@@ -713,6 +799,7 @@
         }
         list.append(gatewaySection);
         list.append(accountSection());
+        list.append(keySection());
 
         $("empty").hidden = state.models.length > 0 || state.gateways.length > 0;
       }

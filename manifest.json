@@ -244,6 +244,12 @@
         "type": "string",
         "default": "",
         "title": "Account endpoints, one per line: Label=http://127.0.0.1:PORT/path (fill in by hand; see README)"
+      },
+      {
+        "key": "keyApiBase",
+        "type": "string",
+        "default": "http://127.0.0.1:9822",
+        "title": "DaddySuite ledger base URL (key creation), e.g. http://127.0.0.1:9822"
       }
     ],
     "services": [

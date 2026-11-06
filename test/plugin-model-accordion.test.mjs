@@ -175,6 +175,7 @@ test("manifest pairs every contribution with the permission it needs", () => {
       "foldPickerProviders",
       "pickerFoldCollapsedByDefault",
       "accountEndpoints",
+        "keyApiBase",
     ],
   );
   assert.deepEqual(
@@ -527,7 +528,9 @@ test("the view reaches the host only through the channels the entry handles", ()
   ].sort();
 
   assert.deepEqual(channels, [
+    "modelCatalog.copyKey",
     "modelCatalog.copyProviderEntry",
+    "modelCatalog.createKey",
     "modelCatalog.refresh",
     "modelCatalog.state",
   ]);
@@ -830,4 +833,83 @@ test("the connector daemons are understood: data envelope, realm, credits", asyn
   assert.equal(kuku.accounts[0].plan, "personal");
   assert.equal(kuku.accounts[0].credits, 1577.52);
   assert.match(kuku.accounts[0].expiresAt, /^\d{4}-\d{2}-/);
+});
+
+test("createKey posts the pi- name to that provider's ledger namespace", async () => {
+  const seen = [];
+  const { pi, calls } = makePi({
+    settings: { keyApiBase: "http://127.0.0.1:9822" },
+    fetch: (url, input) => {
+      if (input?.method === "POST") {
+        seen.push({ url, input });
+        return { status: 200, bodyText: JSON.stringify({ ok: true, key: "sk-created", record: {} }) };
+      }
+      return new Error("ECONNREFUSED");
+    },
+  });
+  const plugin = loadPlugin(pi);
+
+  const result = await plugin.onPanelInvoke("modelCatalog.createKey", { providerId: "qoder-cn" });
+  assert.equal(result.ok, true);
+  assert.equal(result.key, "sk-created");
+  assert.equal(result.region, "cn");
+  assert.equal(seen.length, 1);
+  assert.match(seen[0].url, /127\.0\.0\.1:9822\/api\/qoder\/gateway\/keys$/);
+  assert.deepEqual(JSON.parse(seen[0].input.body), { name: "pi-qoder-\u56fd\u5185\u7248", region: "cn" });
+
+  // Creating copies on its own; the copy channel stays as a manual fallback.
+  assert.deepEqual(calls.clipboard, ["sk-created"]);
+  await plugin.onPanelInvoke("modelCatalog.copyKey", { key: "sk-created" });
+  assert.deepEqual(calls.clipboard, ["sk-created", "sk-created"]);
+});
+
+test("createKey refuses unknown targets and surfaces the ledger refusal", async () => {
+  const { pi } = makePi({
+    settings: {},
+    fetch: () => ({
+      status: 200,
+      bodyText: JSON.stringify({ ok: false, error: "\u81ea\u5b9a\u4e49\u5bc6\u94a5\u649e\u8f66" }),
+    }),
+  });
+  const plugin = loadPlugin(pi);
+
+  await assert.rejects(
+    () => plugin.onPanelInvoke("modelCatalog.createKey", { providerId: "nope" }),
+    /unknown key target/,
+  );
+  await assert.rejects(
+    () => plugin.onPanelInvoke("modelCatalog.createKey", { providerId: "workbuddy-ai" }),
+    /\u649e\u8f66/,
+  );
+});
+
+test("a minted key is reused against the gateway that refused an anonymous list", async () => {
+  const { pi } = makePi({
+    settings: { gatewayPorts: "57891" },
+    fetch: (url, input) => {
+      if (url.includes(":9822/") && input?.method === "POST") {
+        return { status: 200, bodyText: JSON.stringify({ ok: true, key: "sk-minted" }) };
+      }
+      if (url.includes(":57891/v1/models")) {
+        return input?.headers?.authorization === "Bearer sk-minted"
+          ? { status: 200, bodyText: GATEWAY_BODY }
+          : { status: 401, bodyText: "{}" };
+      }
+      return new Error("ECONNREFUSED");
+    },
+  });
+  const plugin = loadPlugin(pi);
+  await plugin.onLoad();
+
+  const locked = await plugin.onPanelInvoke("modelCatalog.refresh", {});
+  const before = locked.gateways.find((item) => item.baseUrl.includes(":57891"));
+  assert.equal(before.ok, false);
+  assert.equal(before.needsKey, true);
+
+  await plugin.onPanelInvoke("modelCatalog.createKey", { providerId: "workbuddy-cn" });
+  const unlocked = await plugin.onPanelInvoke("modelCatalog.refresh", {});
+  const after = unlocked.gateways.find((item) => item.baseUrl.includes(":57891"));
+  assert.equal(after.ok, true);
+  assert.ok(after.models.length > 0);
+  assert.deepEqual(unlocked.created, ["workbuddy-cn"]);
 });
