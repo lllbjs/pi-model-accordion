@@ -1,0 +1,279 @@
+{
+  "schemaVersion": 1,
+  "id": "local.pi-model-accordion",
+  "name": "PI Model Accordion",
+  "version": "0.3.0",
+  "description": "Reads the host's model list and the model lists of local OpenAI-compatible gateways (WorkBuddy / Trae / Qoder style), then shows them in a collapsible, searchable view.",
+  "main": "main.js",
+  "renderer": "renderer/index.mjs",
+  "rendererActions": [
+    "plugin.call"
+  ],
+  "rendererCallMethods": [
+    "modelCatalog.openView",
+    "modelCatalog.refresh",
+    "modelCatalog.pickerFold"
+  ],
+  "net": {
+    "domains": [
+      "127.0.0.1",
+      "localhost"
+    ]
+  },
+  "contributes": {
+    "views": [
+      {
+        "id": "models",
+        "title": {
+          "en": "PI Model Accordion",
+          "zh-CN": "模型列表",
+          "zh-TW": "模型列表"
+        },
+        "icon": "list-checks",
+        "entry": "views/models.html",
+        "order": 20
+      }
+    ],
+    "commands": [
+      {
+        "id": "modelCatalog.open",
+        "title": "Model Catalog: Open model list",
+        "keywords": [
+          "model",
+          "models",
+          "catalog",
+          "模型",
+          "列表"
+        ],
+        "category": "Models"
+      },
+      {
+        "id": "modelCatalog.refresh",
+        "title": "Model Catalog: Refresh models",
+        "keywords": [
+          "model",
+          "models",
+          "refresh",
+          "模型",
+          "刷新"
+        ],
+        "category": "Models"
+      }
+    ],
+    "providers": [
+      {
+        "id": "workbuddy-cn",
+        "name": "WorkBuddy 国内版",
+        "category": {
+          "en": "Local gateways",
+          "zh-CN": "本机网关"
+        },
+        "description": {
+          "en": "国内版：用国内账号的密钥。与「国际版」同一个网关地址，靠密钥区分区域。",
+          "zh-CN": "国内版：用国内账号的密钥。与「国际版」同一个网关地址，靠密钥区分区域。"
+        },
+        "baseUrl": "http://127.0.0.1:57891/v1",
+        "apiStyle": "chat_completions",
+        "authKind": "api_key",
+        "models": []
+      },
+      {
+        "id": "workbuddy-ai",
+        "name": "WorkBuddy 国际版",
+        "category": {
+          "en": "Local gateways",
+          "zh-CN": "本机网关"
+        },
+        "description": {
+          "en": "国际版：用国际账号的密钥。与「国内版」同一个网关地址，靠密钥区分区域。",
+          "zh-CN": "国际版：用国际账号的密钥。与「国内版」同一个网关地址，靠密钥区分区域。"
+        },
+        "baseUrl": "http://127.0.0.1:57891/v1",
+        "apiStyle": "chat_completions",
+        "authKind": "api_key",
+        "models": []
+      },
+      {
+        "id": "trae-cn",
+        "name": "Trae 国内版",
+        "category": {
+          "en": "Local gateways",
+          "zh-CN": "本机网关"
+        },
+        "description": {
+          "en": "国内版：用 Trae CN 的密钥。与「国际版」同一个网关地址，靠密钥区分区域。",
+          "zh-CN": "国内版：用 Trae CN 的密钥。与「国际版」同一个网关地址，靠密钥区分区域。"
+        },
+        "baseUrl": "http://127.0.0.1:7864/v1",
+        "apiStyle": "chat_completions",
+        "authKind": "api_key",
+        "models": []
+      },
+      {
+        "id": "trae-intl",
+        "name": "Trae 国际版",
+        "category": {
+          "en": "Local gateways",
+          "zh-CN": "本机网关"
+        },
+        "description": {
+          "en": "国际版：用 Trae 国际账号的密钥。与「国内版」同一个网关地址，靠密钥区分区域。",
+          "zh-CN": "国际版：用 Trae 国际账号的密钥。与「国内版」同一个网关地址，靠密钥区分区域。"
+        },
+        "baseUrl": "http://127.0.0.1:7864/v1",
+        "apiStyle": "chat_completions",
+        "authKind": "api_key",
+        "models": []
+      },
+      {
+        "id": "raccoon-gateway",
+        "name": "小浣熊 本机网关",
+        "category": {
+          "en": "Local gateways",
+          "zh-CN": "本机网关"
+        },
+        "description": {
+          "en": "DaddySuite 为商汤小浣熊提供的本机 OpenAI 兼容网关。",
+          "zh-CN": "DaddySuite 为商汤小浣熊提供的本机 OpenAI 兼容网关。"
+        },
+        "baseUrl": "http://127.0.0.1:57898/v1",
+        "apiStyle": "chat_completions",
+        "authKind": "api_key",
+        "models": []
+      },
+      {
+        "id": "qoder-cn",
+        "name": "Qoder 国内版",
+        "category": {
+          "en": "Local gateways",
+          "zh-CN": "本机网关"
+        },
+        "description": {
+          "en": "国内版：用 Qoder CN 的密钥。与「国际版」同一个网关地址，靠密钥区分区域。",
+          "zh-CN": "国内版：用 Qoder CN 的密钥。与「国际版」同一个网关地址，靠密钥区分区域。"
+        },
+        "baseUrl": "http://127.0.0.1:57895/v1",
+        "apiStyle": "chat_completions",
+        "authKind": "api_key",
+        "models": []
+      },
+      {
+        "id": "qoder-intl",
+        "name": "Qoder 国际版",
+        "category": {
+          "en": "Local gateways",
+          "zh-CN": "本机网关"
+        },
+        "description": {
+          "en": "国际版：用 Qoder 国际账号的密钥。与「国内版」同一个网关地址，靠密钥区分区域。",
+          "zh-CN": "国际版：用 Qoder 国际账号的密钥。与「国内版」同一个网关地址，靠密钥区分区域。"
+        },
+        "baseUrl": "http://127.0.0.1:57895/v1",
+        "apiStyle": "chat_completions",
+        "authKind": "api_key",
+        "models": []
+      },
+      {
+        "id": "kuku-gateway",
+        "name": "库库 本机网关",
+        "category": {
+          "en": "Local gateways",
+          "zh-CN": "本机网关"
+        },
+        "description": {
+          "en": "DaddySuite 为库库AI 提供的本机 OpenAI 兼容网关。",
+          "zh-CN": "DaddySuite 为库库AI 提供的本机 OpenAI 兼容网关。"
+        },
+        "baseUrl": "http://127.0.0.1:57896/v1",
+        "apiStyle": "chat_completions",
+        "authKind": "api_key",
+        "models": []
+      }
+    ],
+    "settings": [
+      {
+        "key": "refreshOnStartup",
+        "type": "boolean",
+        "default": true,
+        "title": "Refresh the model lists when the plugin loads"
+      },
+      {
+        "key": "autoRefreshMinutes",
+        "type": "number",
+        "default": 10,
+        "title": "Auto refresh interval in minutes (0 disables the timer)"
+      },
+      {
+        "key": "groupByProvider",
+        "type": "boolean",
+        "default": true,
+        "title": "Group the list by provider"
+      },
+      {
+        "key": "gatewayEndpoints",
+        "type": "string",
+        "default": "",
+        "title": "Local gateway endpoints, one per line: Label=http://127.0.0.1:PORT/v1"
+      },
+      {
+        "key": "gatewayPorts",
+        "type": "string",
+        "default": "1234,3000,5000,7864,8000,8080,8081,8787,8790,9000,11434,47862,47900,47901,57891,57895,57896,57898",
+        "title": "Loopback ports to scan for an OpenAI-compatible /v1/models endpoint"
+      },
+      {
+        "key": "probeTimeoutMs",
+        "type": "number",
+        "default": 400,
+        "title": "Per-endpoint probe timeout in milliseconds"
+      },
+      {
+        "key": "foldPickerProviders",
+        "type": "boolean",
+        "default": true,
+        "title": "Fold the host's model picker by provider (the plugin decorates the picker's DOM)"
+      },
+      {
+        "key": "pickerFoldCollapsedByDefault",
+        "type": "boolean",
+        "default": true,
+        "title": "Start with provider groups folded, opening the current model's provider"
+      },
+      {
+        "key": "accountEndpoints",
+        "type": "string",
+        "default": "",
+        "title": "Account endpoints, one per line: Label=http://127.0.0.1:PORT/path (fill in by hand; see README)"
+      }
+    ],
+    "services": [
+      {
+        "id": "autoRefresh",
+        "label": "Model list auto refresh"
+      }
+    ],
+    "bus": {
+      "publish": [
+        "local.pi-model-accordion.updated"
+      ]
+    }
+  },
+  "permissions": [
+    "ui.view",
+    "models.list",
+    "net.fetch",
+    "clipboard.write",
+    "background.service",
+    "bus.publish",
+    "renderer.extension",
+    "provider.register"
+  ],
+  "engines": {
+    "piDesktop": ">=0.1.0"
+  },
+  "activationEvents": [
+    "onStartup",
+    "onCommand:modelCatalog.open",
+    "onCommand:modelCatalog.refresh"
+  ]
+}

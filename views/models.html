@@ -1,0 +1,775 @@
+<!doctype html>
+<html lang="en" data-mode="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="pi-plugin-chrome" content="v2" />
+    <title>Model Catalog</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #ffffff;
+        --fg: #1f2328;
+        --muted: #6b7280;
+        --line: #e5e7eb;
+        --hover: #f4f5f7;
+        --accent: #2563eb;
+        --danger: #b42318;
+        --chip-bg: #eef2ff;
+        --chip-fg: #3730a3;
+      }
+      :root[data-mode="dark"] {
+        color-scheme: dark;
+        --bg: #16181d;
+        --fg: #e6e8eb;
+        --muted: #9aa1ab;
+        --line: #2b2f36;
+        --hover: #21252b;
+        --accent: #7aa2f7;
+        --danger: #f0a5a0;
+        --chip-bg: #232a3a;
+        --chip-fg: #b8c4ff;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+      }
+      body {
+        padding-top: var(--pi-plugin-titlebar-height, 0px);
+        background: var(--bg);
+        color: var(--fg);
+        font:
+          13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Microsoft YaHei", sans-serif;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      header {
+        position: sticky;
+        top: var(--pi-plugin-titlebar-height, 0px);
+        z-index: 1;
+        background: var(--bg);
+        border-bottom: 1px solid var(--line);
+        padding: 10px 12px 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .headline {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+      }
+      h1 {
+        font-size: 13px;
+        font-weight: 600;
+        margin: 0;
+      }
+      .meta {
+        color: var(--muted);
+        font-size: 12px;
+        margin-left: auto;
+        white-space: nowrap;
+      }
+      .controls {
+        display: flex;
+        gap: 8px;
+      }
+      input[type="search"] {
+        flex: 1;
+        min-width: 0;
+        padding: 5px 8px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+      }
+      input[type="search"]:focus {
+        outline: 2px solid var(--accent);
+        outline-offset: -1px;
+      }
+      button {
+        font: inherit;
+        color: inherit;
+      }
+      #refresh {
+        padding: 5px 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: transparent;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      #refresh:hover:not(:disabled) {
+        background: var(--hover);
+      }
+      #refresh:disabled {
+        color: var(--muted);
+        cursor: default;
+      }
+      main {
+        flex: 1;
+        overflow: auto;
+        padding: 6px 8px 16px;
+      }
+      .section + .section {
+        margin-top: 10px;
+        border-top: 1px solid var(--line);
+        padding-top: 8px;
+      }
+      .section-title {
+        margin: 4px 6px 2px;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .section-hint {
+        margin: 0 6px 6px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .notice {
+        margin: 8px 8px 0;
+        color: var(--danger);
+        font-size: 12px;
+      }
+      .group-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        width: 100%;
+        padding: 5px 6px;
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        text-align: left;
+        cursor: pointer;
+      }
+      .group-header:hover {
+        background: var(--hover);
+      }
+      .caret {
+        width: 10px;
+        color: var(--muted);
+      }
+      .group-name {
+        font-weight: 600;
+      }
+      .group-endpoint {
+        color: var(--muted);
+        font-size: 11px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .group-count {
+        margin-left: auto;
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+      }
+      .group-body {
+        padding: 0 0 6px 16px;
+      }
+      .group-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 6px 6px 16px;
+      }
+      .group-actions button {
+        padding: 3px 8px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: transparent;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .group-actions button:hover {
+        background: var(--hover);
+      }
+      .group-error {
+        color: var(--danger);
+        font-size: 12px;
+        padding: 0 6px 6px 16px;
+      }
+      .model {
+        padding: 4px 6px;
+        border-radius: 6px;
+      }
+      .model:hover {
+        background: var(--hover);
+      }
+      .model-top {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .model-label {
+        font-weight: 500;
+        word-break: break-word;
+      }
+      .chip {
+        padding: 0 5px;
+        border-radius: 999px;
+        background: var(--chip-bg);
+        color: var(--chip-fg);
+        font-size: 11px;
+        line-height: 16px;
+      }
+      .model-meta {
+        color: var(--muted);
+        font-size: 12px;
+        word-break: break-all;
+      }
+      .model-meta code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .empty {
+        margin: 24px 12px;
+        color: var(--muted);
+        text-align: center;
+      }
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="headline">
+        <h1 id="title">Model Catalog</h1>
+        <span class="meta"><span id="count">–</span> · <span id="updated"></span></span>
+      </div>
+      <div class="controls">
+        <input id="search" type="search" autocomplete="off" spellcheck="false" />
+        <button id="refresh" type="button">Refresh</button>
+      </div>
+    </header>
+    <p id="host-error" class="notice" hidden></p>
+    <p id="gateway-error" class="notice" hidden></p>
+    <main id="list"></main>
+    <p id="empty" class="empty" hidden></p>
+
+    <script>
+      // A docked view has no `pi` API: everything crosses window.pluginBridge,
+      // and only through channels this plugin's entry implements.
+      const bridge = window.pluginBridge;
+      const $ = (id) => document.getElementById(id);
+
+      const COPY = {
+        en: {
+          title: "PI Model Accordion",
+          search: "Search models",
+          refresh: "Refresh",
+          refreshing: "Refreshing…",
+          total: (count) => `${count} model(s)`,
+          matching: (shown, total) => `${shown} of ${total}`,
+          updated: (time) => `updated ${time}`,
+          never: "never updated",
+          empty: "No model from the host catalog and no local gateway answered.",
+          hostTitle: "Host catalog",
+          gatewayTitle: "Local gateways",
+          gatewayHint: (probed) =>
+            `Scanned ${probed} loopback endpoint(s). Name one in Settings → Model Catalog as Label=http://127.0.0.1:PORT/v1.`,
+          hostError: (message) => `Host catalog: ${message}`,
+          gatewayError: (message) => `Local gateways: ${message}`,
+          needsKeyChip: "needs key",
+          lockedHint:
+            "Running, but it will not list models without a key: copy its provider entry, add it in Settings → Models and save the key once — the host then discovers its models.",
+          lockedCount: (count) => `${count} need a key`,
+          copyEntry: "Copy provider entry",
+          copied: "Copied ✓",
+          copyFailed: "Copy failed",
+          defaultChip: "default",
+          reasoningChip: "reasoning",
+          subagentChip: "subagents",
+          aliasChip: "alias",
+          thinkingChip: "thinking",
+        },
+        "zh-CN": {
+          title: "模型列表",
+          search: "搜索模型",
+          refresh: "刷新",
+          refreshing: "刷新中…",
+          total: (count) => `${count} 个模型`,
+          matching: (shown, total) => `${shown} / ${total}`,
+          updated: (time) => `更新于 ${time}`,
+          never: "尚未更新",
+          empty: "宿主模型目录为空，也没有本机网关应答。",
+          hostTitle: "宿主模型目录",
+          gatewayTitle: "本机网关",
+          gatewayHint: (probed) =>
+            `已扫描 ${probed} 个本机端点。要给它起名字，请在 设置 → 模型列表 里写 名称=http://127.0.0.1:端口/v1。`,
+          hostError: (message) => `宿主目录：${message}`,
+          gatewayError: (message) => `本机网关：${message}`,
+          needsKeyChip: "需要密钥",
+          lockedHint:
+            "网关在运行，但没有密钥不返回模型列表：复制它的 provider 声明，在 设置 → 模型 里添加并保存一次密钥，宿主就会自动发现它的模型。",
+          lockedCount: (count) => `${count} 个需密钥`,
+          copyEntry: "复制 provider 声明",
+          copied: "已复制 ✓",
+          copyFailed: "复制失败",
+          defaultChip: "默认",
+          reasoningChip: "推理",
+          subagentChip: "子代理",
+          aliasChip: "别名",
+          thinkingChip: "思考",
+        },
+        "zh-TW": {
+          title: "模型列表",
+          search: "搜尋模型",
+          refresh: "重新整理",
+          refreshing: "重新整理中…",
+          total: (count) => `${count} 個模型`,
+          matching: (shown, total) => `${shown} / ${total}`,
+          updated: (time) => `更新於 ${time}`,
+          never: "尚未更新",
+          empty: "宿主模型目錄為空，也沒有本機閘道回應。",
+          hostTitle: "宿主模型目錄",
+          gatewayTitle: "本機閘道",
+          gatewayHint: (probed) =>
+            `已掃描 ${probed} 個本機端點。要為它命名，請在 設定 → 模型列表 裡寫 名稱=http://127.0.0.1:埠/v1。`,
+          hostError: (message) => `宿主目錄：${message}`,
+          gatewayError: (message) => `本機閘道：${message}`,
+          needsKeyChip: "需要金鑰",
+          lockedHint:
+            "閘道正在執行，但沒有金鑰不會回傳模型清單：複製它的 provider 宣告，在 設定 → 模型 裡新增並儲存一次金鑰，宿主就會自動發現它的模型。",
+          lockedCount: (count) => `${count} 個需金鑰`,
+          copyEntry: "複製 provider 宣告",
+          copied: "已複製 ✓",
+          copyFailed: "複製失敗",
+          defaultChip: "預設",
+          reasoningChip: "推理",
+          subagentChip: "子代理",
+          aliasChip: "別名",
+          thinkingChip: "思考",
+        },
+      };
+
+      function copyFor(locale) {
+        const tag = String(locale || "").toLowerCase();
+        if (tag.startsWith("zh-tw") || tag.startsWith("zh-hk") || tag.startsWith("zh-hant")) {
+          return COPY["zh-TW"];
+        }
+        if (tag.startsWith("zh")) return COPY["zh-CN"];
+        return COPY.en;
+      }
+
+      const state = {
+        models: [],
+        hostError: null,
+        gateways: [],
+        gatewayError: null,
+        accounts: [],
+        accountError: null,
+        probed: 0,
+        updatedAt: null,
+        refreshing: false,
+        settings: { groupByProvider: true, autoRefreshMinutes: 10, refreshOnStartup: true },
+        query: "",
+        collapsed: new Set(),
+        locale: "en",
+      };
+      let T = COPY.en;
+
+      function text(value, className) {
+        const node = document.createElement("span");
+        if (className) node.className = className;
+        node.textContent = value;
+        return node;
+      }
+
+      function chip(label) {
+        return text(label, "chip");
+      }
+
+      function formatTime(iso) {
+        if (!iso) return T.never;
+        const date = new Date(iso);
+        if (Number.isNaN(date.getTime())) return T.never;
+        return date.toLocaleTimeString(state.locale, {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        });
+      }
+
+      function matchesHost(model, query) {
+        return [model.label, model.modelId, model.key, model.alias, model.providerName, model.providerId].some(
+          (value) => typeof value === "string" && value.toLowerCase().includes(query),
+        );
+      }
+
+      function matchesGateway(gateway, query) {
+        if (!query) return true;
+        return [gateway.label, gateway.baseUrl].some(
+          (value) => typeof value === "string" && value.toLowerCase().includes(query),
+        ) || gateway.models.some((model) => model.id.toLowerCase().includes(query));
+      }
+
+      function hostGroups(models) {
+        const byId = new Map();
+        for (const model of models) {
+          const id = String(model.providerId || "unknown");
+          if (!byId.has(id)) {
+            byId.set(id, { key: `host:${id}`, name: String(model.providerName || id), models: [] });
+          }
+          byId.get(id).models.push(model);
+        }
+        return [...byId.values()];
+      }
+
+      function section(titleKey, hint) {
+        const node = document.createElement("section");
+        node.className = "section";
+        node.append(text(T[titleKey], "section-title"));
+        if (hint) node.append(text(hint, "section-hint"));
+        return node;
+      }
+
+      function groupShell(entry, expanded, headerExtra) {
+        const sectionNode = document.createElement("section");
+        const header = document.createElement("button");
+        header.type = "button";
+        header.className = "group-header";
+        header.setAttribute("aria-expanded", String(expanded));
+        header.append(text(expanded ? "▾" : "▸", "caret"), text(entry.name, "group-name"));
+        if (headerExtra) header.append(headerExtra);
+        header.append(text(String(entry.models.length), "group-count"));
+        header.addEventListener("click", () => {
+          if (state.collapsed.has(entry.key)) state.collapsed.delete(entry.key);
+          else state.collapsed.add(entry.key);
+          render();
+        });
+        sectionNode.append(header);
+        return sectionNode;
+      }
+
+      function hostModelRow(model) {
+        const row = document.createElement("article");
+        row.className = "model";
+
+        const top = document.createElement("div");
+        top.className = "model-top";
+        top.append(text(String(model.label || model.modelId || model.key || ""), "model-label"));
+        if (model.isDefault) top.append(chip(T.defaultChip));
+        if (model.supportsReasoning) top.append(chip(T.reasoningChip));
+        if (model.availableForSubagents) top.append(chip(T.subagentChip));
+
+        const meta = document.createElement("div");
+        meta.className = "model-meta";
+        const key = document.createElement("code");
+        key.textContent = String(model.key || `${model.providerId || ""}/${model.modelId || ""}`);
+        meta.append(key);
+        if (model.alias) meta.append(text(` · ${T.aliasChip} ${model.alias}`));
+        if (Array.isArray(model.thinkingLevels) && model.thinkingLevels.length > 0) {
+          meta.append(text(` · ${T.thinkingChip} ${model.thinkingLevels.join(" / ")}`));
+        }
+
+        row.append(top, meta);
+        return row;
+      }
+
+      function gatewayModelRow(model) {
+        const row = document.createElement("article");
+        row.className = "model";
+        const top = document.createElement("div");
+        top.className = "model-top";
+        top.append(text(model.id, "model-label"));
+        if (model.owner) top.append(chip(model.owner));
+        row.append(top);
+        return row;
+      }
+
+      function gatewayActions(gateway) {
+        const row = document.createElement("div");
+        row.className = "group-actions";
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = T.copyEntry;
+        button.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          try {
+            await bridge.invoke("modelCatalog.copyProviderEntry", {
+              label: gateway.label,
+              baseUrl: gateway.baseUrl,
+            });
+            button.textContent = T.copied;
+          } catch {
+            button.textContent = T.copyFailed;
+          }
+          window.setTimeout(() => {
+            button.textContent = T.copyEntry;
+          }, 1500);
+        });
+        row.append(button);
+        return row;
+      }
+
+      const ACCOUNT_COPY = {
+        en: {
+          title: "Accounts",
+          hint: (n) => `${n} source(s) · accounts, credits, sign-in`,
+          configure: "Add a DaddySuite account endpoint in this plugin's settings.",
+          unknown: "Unknown — the endpoint did not answer",
+          needsKey: "Unknown — the endpoint wants a key",
+          empty: "No accounts reported",
+          plan: "Plan",
+          credits: "Credits",
+          expires: "Credential expires",
+          total: (value) => `Total credits: ${value}`,
+          signIn: (value) => `Sign-in: ${value}`,
+          pool: (value) => `IP pool: ${value}`,
+          none: "\u2014",
+        },
+        "zh-CN": {
+          title: "\u8d26\u53f7",
+          hint: (n) => `${n} \u4e2a\u6570\u636e\u6e90 \u00b7 \u8d26\u53f7\u3001\u79ef\u5206\u3001\u7b7e\u5230`,
+          configure: "\u5728\u672c\u63d2\u4ef6\u8bbe\u7f6e\u91cc\u586b\u5199 DaddySuite \u8d26\u53f7\u63a5\u53e3\u5730\u5740\u3002",
+          unknown: "\u672a\u77e5 \u2014 \u63a5\u53e3\u672a\u54cd\u5e94",
+          needsKey: "\u672a\u77e5 \u2014 \u63a5\u53e3\u8981\u6c42\u5bc6\u94a5",
+          empty: "\u672a\u8fd4\u56de\u8d26\u53f7",
+          plan: "\u5957\u9910",
+          credits: "\u79ef\u5206",
+          expires: "\u51ed\u8bc1\u5230\u671f",
+          total: (value) => `\u79ef\u5206\u603b\u989d\uff1a${value}`,
+          signIn: (value) => `\u7b7e\u5230\uff1a${value}`,
+          pool: (value) => `IP \u6c60\uff1a${value}`,
+          none: "\u2014",
+        },
+        "zh-TW": {
+          title: "\u5e33\u865f",
+          hint: (n) => `${n} \u500b\u8cc7\u6599\u4f86\u6e90 \u00b7 \u5e33\u865f\u3001\u7a4d\u5206\u3001\u7c3d\u5230`,
+          configure: "\u5728\u672c\u63d2\u4ef6\u8a2d\u5b9a\u88e1\u586b\u5beb DaddySuite \u5e33\u865f\u4ecb\u9762\u4f4d\u5740\u3002",
+          unknown: "\u672a\u77e5 \u2014 \u4ecb\u9762\u672a\u56de\u61c9",
+          needsKey: "\u672a\u77e5 \u2014 \u4ecb\u9762\u8981\u6c42\u91d1\u9470",
+          empty: "\u672a\u56de\u50b3\u5e33\u865f",
+          plan: "\u65b9\u6848",
+          credits: "\u7a4d\u5206",
+          expires: "\u6191\u8b49\u5230\u671f",
+          total: (value) => `\u7a4d\u5206\u7e3d\u984d\uff1a${value}`,
+          signIn: (value) => `\u7c3d\u5230\uff1a${value}`,
+          pool: (value) => `IP \u6c60\uff1a${value}`,
+          none: "\u2014",
+        },
+      };
+
+      function accountCopy() {
+        const tag = String(state.locale || "").toLowerCase();
+        if (tag.startsWith("zh-tw") || tag.startsWith("zh-hk") || tag.startsWith("zh-hant")) {
+          return ACCOUNT_COPY["zh-TW"];
+        }
+        if (tag.startsWith("zh")) return ACCOUNT_COPY["zh-CN"];
+        return ACCOUNT_COPY.en;
+      }
+
+      function accountRow(entry, A) {
+        const row = document.createElement("article");
+        const top = document.createElement("div");
+        top.append(text(entry.name || entry.id || A.none));
+        if (entry.status) top.append(chip(entry.status));
+        if (entry.region) top.append(chip(entry.region));
+        row.append(top);
+        const meta = document.createElement("div");
+        const fields = [
+          entry.plan ? `${A.plan}: ${entry.plan}` : "",
+          entry.credits === null ? "" : `${A.credits}: ${entry.credits}`,
+          entry.expiresAt ? `${A.expires}: ${formatTime(entry.expiresAt)}` : "",
+        ].filter(Boolean);
+        for (const field of fields) meta.append(text(field));
+        if (meta.childElementCount > 0) row.append(meta);
+        return row;
+      }
+
+      function accountSection() {
+        const A = accountCopy();
+        const sources = state.accounts ?? [];
+        const node = document.createElement("section");
+        const heading = document.createElement("h2");
+        heading.textContent = A.title;
+        node.append(heading);
+        node.append(text(A.hint(sources.length), "section-hint"));
+        if (sources.length === 0) {
+          node.append(text(A.configure, "section-hint"));
+          return node;
+        }
+        for (const source of sources) {
+          const block = document.createElement("div");
+          const head = document.createElement("div");
+          head.append(text(source.label || source.url));
+          head.append(text(source.url, "group-endpoint"));
+          block.append(head);
+          if (!source.ok) {
+            const reason = source.needsKey
+              ? A.needsKey
+              : `${A.unknown}${source.error ? ` (${source.error})` : ""}`;
+            block.append(text(reason, "group-error"));
+          } else {
+            if (source.accounts.length === 0) block.append(text(A.empty, "section-hint"));
+            for (const account of source.accounts) block.append(accountRow(account, A));
+            const extras = [];
+            if (source.totals && source.totals.credits !== null) {
+              extras.push(A.total(source.totals.credits));
+            }
+            if (source.signIn && source.signIn.done) {
+              extras.push(A.signIn(source.signIn.at ? formatTime(source.signIn.at) : "\u2713"));
+            }
+            if (source.ipPool && source.ipPool.total !== null) {
+              extras.push(A.pool(`${source.ipPool.available ?? "?"}/${source.ipPool.total}`));
+            }
+            if (extras.length > 0) block.append(text(extras.join(" \u00b7 ")));
+          }
+          node.append(block);
+        }
+        return node;
+      }
+
+      function render() {
+        document.documentElement.lang = state.locale;
+        $("title").textContent = T.title;
+        $("search").placeholder = T.search;
+        $("search").setAttribute("aria-label", T.search);
+        $("refresh").textContent = state.refreshing ? T.refreshing : T.refresh;
+        $("refresh").disabled = state.refreshing;
+        $("empty").textContent = T.empty;
+
+        const query = state.query.trim().toLowerCase();
+        const hostModels = query ? state.models.filter((model) => matchesHost(model, query)) : state.models;
+        const gateways = state.gateways.filter((gateway) => matchesGateway(gateway, query));
+        const hostCount = state.models.length;
+        const gatewayModelCount = state.gateways.reduce((total, item) => total + item.models.length, 0);
+        const lockedCount = state.gateways.filter((gateway) => gateway.needsKey).length;
+        const lockedSuffix = lockedCount > 0 ? ` · ${T.lockedCount(lockedCount)}` : "";
+        $("count").textContent = query
+          ? T.matching(hostModels.length + gateways.length, hostCount + state.gateways.length)
+          : `${T.total(hostCount)} · ${state.gateways.length} gw / ${gatewayModelCount}${lockedSuffix}`;
+        $("updated").textContent = T.updated(formatTime(state.updatedAt));
+
+        const hostError = $("host-error");
+        hostError.hidden = !state.hostError;
+        if (state.hostError) hostError.textContent = T.hostError(state.hostError);
+        const gatewayError = $("gateway-error");
+        gatewayError.hidden = !state.gatewayError;
+        if (state.gatewayError) gatewayError.textContent = T.gatewayError(state.gatewayError);
+
+        const list = $("list");
+        list.replaceChildren();
+
+        const hostSection = section("hostTitle");
+        const groups = state.settings.groupByProvider
+          ? hostGroups(hostModels)
+          : [{ key: "host:all", name: T.hostTitle, models: hostModels }];
+        for (const entry of groups) {
+          const expanded = query !== "" || !state.collapsed.has(entry.key);
+          const node = groupShell(entry, expanded);
+          if (expanded) {
+            const body = document.createElement("div");
+            body.className = "group-body";
+            for (const model of entry.models) body.append(hostModelRow(model));
+            node.append(body);
+          }
+          hostSection.append(node);
+        }
+        list.append(hostSection);
+
+        const gatewaySection = section("gatewayTitle", T.gatewayHint(state.probed));
+        if (gateways.length === 0) {
+          gatewaySection.append(text(T.empty, "section-hint"));
+        }
+        for (const gateway of gateways) {
+          const entry = {
+            key: `gw:${gateway.baseUrl}`,
+            name: gateway.label || gateway.baseUrl,
+            models: gateway.models,
+          };
+          const expanded = query !== "" || !state.collapsed.has(entry.key);
+          const meta = text(gateway.baseUrl, "group-endpoint");
+          if (gateway.needsKey) meta.append(chip(T.needsKeyChip));
+          const node = groupShell(entry, expanded, meta);
+          if (expanded) {
+            if (gateway.needsKey) node.append(text(T.lockedHint, "group-endpoint"));
+            if (gateway.error) node.append(text(gateway.error, "group-error"));
+            const body = document.createElement("div");
+            body.className = "group-body";
+            for (const model of gateway.models) body.append(gatewayModelRow(model));
+            node.append(body);
+            node.append(gatewayActions(gateway));
+          }
+          gatewaySection.append(node);
+        }
+        list.append(gatewaySection);
+        list.append(accountSection());
+
+        $("empty").hidden = state.models.length > 0 || state.gateways.length > 0;
+      }
+
+      async function load(force) {
+        try {
+          const next = await bridge.invoke(force ? "modelCatalog.refresh" : "modelCatalog.state");
+          if (next && typeof next === "object") Object.assign(state, next);
+        } catch (error) {
+          state.hostError = String((error && error.message) || error);
+        }
+        render();
+      }
+
+      function applyAppearance(appearance) {
+        const base =
+          appearance && (appearance.base === "dark" || appearance.base === "light")
+            ? appearance.base
+            : window.matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+        document.documentElement.dataset.mode = base;
+        if (appearance && typeof appearance.locale === "string" && appearance.locale) {
+          state.locale = appearance.locale;
+        }
+        T = copyFor(state.locale);
+      }
+
+      $("search").addEventListener("input", (event) => {
+        state.query = event.target.value;
+        render();
+      });
+      $("refresh").addEventListener("click", () => {
+        void load(true);
+      });
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") void load(false);
+      });
+
+      async function init() {
+        try {
+          applyAppearance(await bridge.invoke("app.getAppearance"));
+        } catch {
+          applyAppearance(null);
+        }
+        render();
+        await load(false);
+        bridge.on("appearance:changed", (appearance) => {
+          applyAppearance(appearance);
+          render();
+        });
+        window.setInterval(() => {
+          if (document.visibilityState === "visible") void load(false);
+        }, 15000);
+      }
+
+      void init();
+    </script>
+  </body>
+</html>
