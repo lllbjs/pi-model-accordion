@@ -53,6 +53,14 @@ const GATEWAY_BODY = JSON.stringify({
   ],
 });
 
+/** How many provider rows the manifest pins — one startup probe each. */
+const PINNED = manifest.contributes.providers.length;
+
+/** Every pinned row's `/models` URL, so a scan assertion can exclude them. */
+const PINNED_URLS = new Set(
+  manifest.contributes.providers.map((provider) => `${provider.baseUrl}/models`),
+);
+
 /** The host injects `pi` into the entry module; the test injects a stub the same way. */
 function loadPlugin(pi) {
   const module = { exports: {} };
@@ -71,10 +79,17 @@ function makePi(options = {}) {
     revealed: [],
     fetched: [],
     clipboard: [],
+    desktop: [],
   };
   const pi = {
     app: { getLocale: async () => options.locale ?? "en" },
-    plugin: { getSettings: async () => options.settings ?? {} },
+    plugin: {
+      getSettings: async () => options.settings ?? {},
+      // The host exposes both; `getId` is what the entry falls back to when a
+      // manifest is not at hand.
+      getId: () => manifest.id,
+      getManifest: () => manifest,
+    },
     commands: {
       register: async (definition) => {
         calls.registered.push(definition);
@@ -105,6 +120,17 @@ function makePi(options = {}) {
         const answer = options.fetch?.(input.url, input);
         if (answer instanceof Error) throw answer;
         if (!answer) throw new Error("ECONNREFUSED");
+        return answer;
+      },
+    },
+    // The host's control surface. `providers/listModels` is the only call that
+    // actually rediscovers a row's models, so the tests drive it from here.
+    desktop: {
+      invoke: async (input) => {
+        calls.desktop.push(input);
+        const answer = options.desktop?.(input);
+        if (answer instanceof Error) throw answer;
+        if (!answer) throw new Error("desktop.control unavailable");
         return answer;
       },
     },
@@ -180,7 +206,12 @@ test("manifest pairs every contribution with the permission it needs", () => {
   );
   assert.deepEqual(
     manifest.contributes.commands.map((entry) => entry.id),
-    ["modelCatalog.open", "modelCatalog.refresh"],
+    [
+      "modelCatalog.open",
+      "modelCatalog.refresh",
+      "modelCatalog.refreshHost",
+      "modelCatalog.refreshTargets",
+    ],
   );
 
   // Pinned provider rows: the only way a gateway's models reach the host picker.
@@ -188,16 +219,7 @@ test("manifest pairs every contribution with the permission it needs", () => {
   const providers = manifest.contributes.providers;
   assert.deepEqual(
     providers.map((provider) => provider.id),
-    [
-      "workbuddy-cn",
-      "workbuddy-ai",
-      "trae-cn",
-      "trae-intl",
-      "raccoon-gateway",
-      "qoder-cn",
-      "qoder-intl",
-      "kuku-gateway",
-    ],
+    ["workbuddy-cn", "trae-cn", "qoder-cn", "qoder-intl"],
   );
   for (const provider of providers) {
     assert.equal(provider.authKind, "api_key");
@@ -226,17 +248,25 @@ test("onLoad registers both commands, pulls once, and starts the timer service",
 
   assert.deepEqual(
     calls.registered.map((definition) => definition.id),
-    ["modelCatalog.open", "modelCatalog.refresh"],
+    [
+      "modelCatalog.open",
+      "modelCatalog.refresh",
+      "modelCatalog.refreshHost",
+      "modelCatalog.refreshTargets",
+    ],
   );
-  assert.equal(calls.list, 1);
-  assert.equal(calls.fetched.length, 1);
-  assert.equal(calls.published.length, 1);
-  assert.equal(calls.published[0].topic, "local.pi-model-accordion.updated");
-  assert.equal(calls.published[0].payload.reason, "startup");
-  assert.equal(calls.published[0].payload.count, MODELS.length);
-  assert.equal(calls.published[0].payload.gateways, 1);
-  assert.equal(calls.published[0].payload.gatewayModels, 2);
-  assert.ok(!Number.isNaN(Date.parse(calls.published[0].payload.updatedAt)));
+  // The startup pull, plus one host re-read once the per-row pass finishes.
+  assert.equal(calls.list, 2);
+  // One endpoint probe for the gateway scan, plus one per pinned provider row.
+  assert.equal(calls.fetched.length, 1 + PINNED);
+  // The pull and the per-row pass both announce, so the view lands with lists.
+  assert.ok(calls.published.length >= 1);
+  const startup = calls.published.find((event) => event.payload.reason === "startup");
+  assert.equal(startup.topic, "local.pi-model-accordion.updated");
+  assert.equal(startup.payload.count, MODELS.length);
+  assert.equal(startup.payload.gateways, 1);
+  assert.equal(startup.payload.gatewayModels, 2);
+  assert.ok(!Number.isNaN(Date.parse(startup.payload.updatedAt)));
   assert.equal(calls.services.length, 1);
   assert.equal(calls.services[0].id, "autoRefresh");
   assert.equal(typeof calls.services[0].start, "function");
@@ -277,14 +307,16 @@ test("only gateways that answer are listed, and a configured endpoint keeps its 
     state.gateways.map((gateway) => gateway.label),
     ["Trae", "127.0.0.1:8787"],
   );
-  assert.deepEqual(
-    calls.fetched.filter((url) => url.endsWith("/models")).sort(),
-    [
-      "http://127.0.0.1:8787/v1/models",
-      "http://127.0.0.1:8790/v1/models",
-      "http://127.0.0.1:9998/v1/models",
-    ],
-  );
+  // The scanned candidates are probed, and so is every pinned provider row —
+  // the pinned rows are their own requests, never the same URL twice by design.
+  const scannedUrls = calls.fetched
+    .filter((url) => url.endsWith("/models") && !PINNED_URLS.has(url))
+    .sort();
+  assert.deepEqual(scannedUrls, [
+    "http://127.0.0.1:8787/v1/models",
+    "http://127.0.0.1:8790/v1/models",
+    "http://127.0.0.1:9998/v1/models",
+  ]);
 
   const [configured, scanned] = state.gateways;
   assert.equal(configured.ok, false);
@@ -320,7 +352,8 @@ test("the refresh channel re-pulls and an unknown channel rejects", async () => 
 
   const state = await plugin.onPanelInvoke("modelCatalog.refresh", {});
 
-  assert.equal(calls.list, 2);
+  // The startup pull, the refresh pull, and the host re-read after the rows.
+  assert.equal(calls.list, 4);
   assert.equal(calls.published.at(-1).payload.reason, "view");
   assert.equal(state.models.length, MODELS.length);
   await assert.rejects(
@@ -341,7 +374,8 @@ test("a failed host pull keeps the previous list and records the error", async (
   assert.equal(state.hostError, "host transport unavailable");
   assert.equal(state.models.length, MODELS.length);
   // The snapshot is re-read either way, and the event carries the kept count.
-  assert.equal(calls.published.length, 2);
+  // Startup announces twice (the pull and the per-row pass); this refresh adds one.
+  assert.equal(calls.published.filter((event) => event.payload.reason === "view").length, 1);
   assert.equal(calls.published.at(-1).payload.count, MODELS.length);
 });
 
@@ -515,7 +549,12 @@ test("onUnload releases both commands", async () => {
 
   await plugin.onUnload();
 
-  assert.deepEqual(calls.unregistered, ["modelCatalog.open", "modelCatalog.refresh"]);
+  assert.deepEqual(calls.unregistered, [
+    "modelCatalog.open",
+    "modelCatalog.refresh",
+    "modelCatalog.refreshHost",
+    "modelCatalog.refreshTargets",
+  ]);
 });
 
 test("the view reaches the host only through the channels the entry handles", () => {
@@ -532,6 +571,10 @@ test("the view reaches the host only through the channels the entry handles", ()
     "modelCatalog.copyProviderEntry",
     "modelCatalog.createKey",
     "modelCatalog.refresh",
+    "modelCatalog.refreshGateway",
+    "modelCatalog.refreshHost",
+    "modelCatalog.refreshTarget",
+    "modelCatalog.refreshTargets",
     "modelCatalog.state",
   ]);
   for (const channel of channels) {
@@ -608,6 +651,33 @@ test("picker folding: the fold state machine matches the ported behaviour", () =
     overrides: new Map(),
   });
   assert.deepEqual([...none.values()], [true, false, false]);
+});
+
+test("picker folding: a railed picker is left alone", () => {
+  // The railed layout renders one provider at a time and switches it itself.
+  // Folding there hides the group the rail just selected, which is how the
+  // picker ended up blank for every provider but the current model's.
+  const groups = () => [
+    { id: "Recently used", label: "Recently used", recent: true },
+    { id: "Trae \u56fd\u5185\u7248", label: "Trae \u56fd\u5185\u7248", active: true },
+  ];
+  assert.equal(pickerFold.shouldFold({ groups: groups(), railed: true }), false);
+
+  // The classic multi-provider list still folds.
+  assert.equal(
+    pickerFold.shouldFold({
+      groups: [
+        { id: "OpenAI", label: "OpenAI" },
+        { id: "WorkBuddy", label: "WorkBuddy" },
+      ],
+    }),
+    true,
+  );
+
+  // A single provider group has nothing to fold against, and the recently-used
+  // section does not count as one.
+  assert.equal(pickerFold.shouldFold({ groups: groups() }), false);
+  assert.equal(pickerFold.shouldFold({ groups: [] }), false);
 });
 
 test("picker folding: the host's recently-used section is never folded", () => {
@@ -878,7 +948,7 @@ test("createKey refuses unknown targets and surfaces the ledger refusal", async 
     /unknown key target/,
   );
   await assert.rejects(
-    () => plugin.onPanelInvoke("modelCatalog.createKey", { providerId: "workbuddy-ai" }),
+    () => plugin.onPanelInvoke("modelCatalog.createKey", { providerId: "trae-cn" }),
     /\u649e\u8f66/,
   );
 });
@@ -912,4 +982,393 @@ test("a minted key is reused against the gateway that refused an anonymous list"
   assert.equal(after.ok, true);
   assert.ok(after.models.length > 0);
   assert.deepEqual(unlocked.created, ["workbuddy-cn"]);
+});
+
+test("refreshGateway re-probes one endpoint and leaves the others alone", async () => {
+  let answerOnA = true;
+  let answerOnB = true;
+  const { pi, calls } = makePi({
+    // 8787 is configured, so it survives going away and can be re-refreshed;
+    // 8790 is only scanned, which is enough to prove it is left alone.
+    settings: {
+      gatewayPorts: "8787,8790",
+      gatewayEndpoints: "A=http://127.0.0.1:8787/v1",
+    },
+    fetch: (url) => {
+      if (url.startsWith("http://127.0.0.1:8787/") && answerOnA) {
+        return { status: 200, headers: {}, bodyText: GATEWAY_BODY };
+      }
+      if (url.startsWith("http://127.0.0.1:8790/") && answerOnB) {
+        return { status: 200, headers: {}, bodyText: GATEWAY_BODY };
+      }
+      return new Error("ECONNREFUSED");
+    },
+  });
+  const plugin = loadPlugin(pi);
+  await plugin.onLoad();
+  assert.equal((await plugin.onPanelInvoke("modelCatalog.state", {})).gateways.length, 2);
+
+  // One endpoint restarts: refreshing it re-reads that one and nothing else.
+  answerOnA = false;
+  answerOnB = true;
+  const before = calls.fetched.length;
+  const state = await plugin.onPanelInvoke("modelCatalog.refreshGateway", {
+    baseUrl: "http://127.0.0.1:8787/v1",
+  });
+
+  // Only this endpoint is touched: its model list, and nothing on the other
+  // port. A configured endpoint does not run the identity probe.
+  assert.deepEqual(calls.fetched.slice(before), ["http://127.0.0.1:8787/v1/models"]);
+  // The startup pull and the host re-read after the per-row pass; this channel
+  // adds no host read of its own.
+  assert.equal(calls.list, 2);
+  assert.equal(calls.published.at(-1).payload.reason, "gateway");
+  // A configured endpoint that stopped answering stays in the list with its
+  // error, the way the full scan treats it; the other gateway is untouched.
+  assert.deepEqual(
+    state.gateways.map((gateway) => gateway.baseUrl),
+    ["http://127.0.0.1:8787/v1", "http://127.0.0.1:8790/v1"],
+  );
+  assert.match(state.gateways[0].error, /ECONNREFUSED/);
+  assert.equal(state.gateways[1].ok, true);
+
+  // It comes back: refreshing adds it again with its models.
+  answerOnA = true;
+  const restored = await plugin.onPanelInvoke("modelCatalog.refreshGateway", {
+    baseUrl: "http://127.0.0.1:8787/v1",
+  });
+  const again = restored.gateways.find((gateway) => gateway.baseUrl === "http://127.0.0.1:8787/v1");
+  assert.deepEqual(
+    again.models.map((model) => model.id),
+    ["workbuddy-sonnet", "workbuddy-gpt"],
+  );
+
+  // An endpoint neither listed nor configured is refused, not invented.
+  await assert.rejects(
+    () =>
+      plugin.onPanelInvoke("modelCatalog.refreshGateway", {
+        baseUrl: "http://127.0.0.1:9999/v1",
+      }),
+    /not a known gateway/,
+  );
+  await assert.rejects(
+    () => plugin.onPanelInvoke("modelCatalog.refreshGateway", { baseUrl: "nope" }),
+    /baseUrl is required/,
+  );
+});
+
+test("refreshGateway keeps a configured endpoint that is still down", async () => {
+  const { pi } = makePi({
+    settings: { gatewayEndpoints: "Trae=http://127.0.0.1:9998/v1", gatewayPorts: "8787" },
+  });
+  const plugin = loadPlugin(pi);
+  await plugin.onLoad();
+
+  const state = await plugin.onPanelInvoke("modelCatalog.refreshGateway", {
+    baseUrl: "http://127.0.0.1:9998/v1",
+  });
+
+  assert.equal(state.gateways.length, 1);
+  assert.equal(state.gateways[0].label, "Trae");
+  assert.equal(state.gateways[0].explicit, true);
+  assert.match(state.gateways[0].error, /ECONNREFUSED/);
+});
+
+test("refreshHost re-reads only the host catalog", async () => {
+  const { pi, calls } = makePi({ fetch: openAiOn(8787), settings: { gatewayPorts: "8787" } });
+  const plugin = loadPlugin(pi);
+  await plugin.onLoad();
+
+  const before = calls.fetched.length;
+  const refreshed = await plugin.onPanelInvoke("modelCatalog.refreshHost", {});
+
+  assert.equal(refreshed.models, MODELS.length);
+  assert.equal(refreshed.hostError, null);
+  assert.equal(refreshed.rediscovery, "host-owned");
+  // The startup pull, the per-row host re-read, and this explicit re-read.
+  assert.equal(calls.list, 3);
+  assert.equal(calls.fetched.length, before);
+  assert.equal(calls.published.at(-1).payload.reason, "host");
+});
+
+test("refreshHost reports a host failure and keeps the previous catalog", async () => {
+  const options = { settings: { gatewayPorts: "8787", refreshOnStartup: false } };
+  const { pi } = makePi(options);
+  const plugin = loadPlugin(pi);
+  await plugin.onLoad();
+
+  options.listError = "host transport unavailable";
+  const answer = await plugin.onPanelInvoke("modelCatalog.refreshHost", {});
+  assert.equal(answer.hostError, "host transport unavailable");
+  // No successful read happened yet, so the list stays empty rather than stale.
+  assert.equal(answer.models, 0);
+});
+
+test("the re-read command toasts the host count and surfaces a failure", async () => {
+  const options = { settings: { gatewayPorts: "8787" }, locale: "zh-CN" };
+  const { pi, calls } = makePi(options);
+  const plugin = loadPlugin(pi);
+  await plugin.onLoad();
+
+  const hostCommand = calls.registered.find((entry) => entry.id === "modelCatalog.refreshHost");
+  assert.ok(hostCommand, "the re-read command is registered");
+  await hostCommand.run();
+  assert.deepEqual(calls.toasts.at(-1), {
+    message: `模型列表：已重读宿主目录 — ${MODELS.length} 个模型`,
+    level: "info",
+  });
+
+  options.listError = "host transport unavailable";
+  await hostCommand.run();
+  assert.deepEqual(calls.toasts.at(-1), {
+    message: "模型列表：刷新失败 — host transport unavailable",
+    level: "error",
+  });
+});
+
+test("each configured provider refreshes and lists its own models", async () => {
+  // Two rows share port 57895 but not a region; each answers with its own list.
+  const bodyFor = (owner) =>
+    JSON.stringify({ object: "list", data: [{ id: `${owner}-model`, owned_by: owner }] });
+  const { pi, calls } = makePi({
+    settings: { gatewayPorts: "" },
+    fetch: (url) => {
+      if (url === "http://127.0.0.1:57895/v1/models") {
+        return { status: 200, headers: {}, bodyText: bodyFor("qoder") };
+      }
+      return new Error("ECONNREFUSED");
+    },
+  });
+  const plugin = loadPlugin(pi);
+  await plugin.onLoad();
+
+  const state = await plugin.onPanelInvoke("modelCatalog.state", {});
+  // One entry per pinned row, in manifest order, all still unchecked at first.
+  assert.deepEqual(
+    state.targets.map((entry) => entry.providerId),
+    manifest.contributes.providers.map((provider) => provider.id),
+  );
+
+  const answer = await plugin.onPanelInvoke("modelCatalog.refreshTarget", {
+    providerId: "qoder-cn",
+  });
+  assert.equal(answer.target.providerId, "qoder-cn");
+  assert.equal(answer.target.ok, true);
+  assert.deepEqual(
+    answer.target.models.map((model) => model.id),
+    ["qoder-model"],
+  );
+
+  // A sibling on the same port is its own entry with its own key state: the
+  // two are never merged, which is the whole reason refresh is per entry.
+  const sibling = answer.state.targets.find((entry) => entry.providerId === "qoder-intl");
+  assert.equal(sibling.baseUrl, answer.target.baseUrl);
+  assert.equal(sibling.region, "global");
+  assert.equal(sibling.hasKey, false);
+  // Only this row's request was added by the refresh; the sibling was not
+  // refreshed alongside it. Two startup probes already hit this URL, because
+  // both rows share the port.
+  assert.equal(
+    calls.fetched.filter((url) => url === "http://127.0.0.1:57895/v1/models").length,
+    2 + 1,
+  );
+  await assert.rejects(
+    () => plugin.onPanelInvoke("modelCatalog.refreshTarget", { providerId: "nope" }),
+    (error) => error.code === "MODEL_CATALOG_UNKNOWN_TARGET",
+  );
+});
+
+test("a key minted for one row is the key its refresh sends", async () => {
+  const seen = [];
+  const { pi } = makePi({
+    settings: { gatewayPorts: "", keyApiBase: "http://127.0.0.1:9822" },
+    fetch: (url, input) => {
+      if (url.includes(":9822/") && input?.method === "POST") {
+        return { status: 200, bodyText: JSON.stringify({ ok: true, key: "sk-region-cn" }) };
+      }
+      if (url === "http://127.0.0.1:57891/v1/models") {
+        seen.push(input?.headers?.authorization ?? null);
+        // The gateway only answers the key minted for this region.
+        return input?.headers?.authorization === "Bearer sk-region-cn"
+          ? { status: 200, headers: {}, bodyText: GATEWAY_BODY }
+          : { status: 401, headers: {}, bodyText: "{}" };
+      }
+      return new Error("ECONNREFUSED");
+    },
+  });
+  const plugin = loadPlugin(pi);
+  await plugin.onLoad();
+
+  // Before a key exists the row reports it is reachable but locked.
+  const locked = await plugin.onPanelInvoke("modelCatalog.refreshTarget", {
+    providerId: "workbuddy-cn",
+  });
+  assert.equal(locked.target.needsKey, true);
+  assert.equal(locked.target.hasKey, false);
+
+  await plugin.onPanelInvoke("modelCatalog.createKey", { providerId: "workbuddy-cn" });
+  const unlocked = await plugin.onPanelInvoke("modelCatalog.refreshTarget", {
+    providerId: "workbuddy-cn",
+  });
+  assert.equal(unlocked.target.ok, true);
+  assert.ok(seen.includes("Bearer sk-region-cn"));
+  assert.equal(unlocked.target.hasKey, true);
+});
+
+test("refreshTargets refreshes every row and announces once", async () => {
+  const { pi, calls } = makePi({
+    settings: { gatewayPorts: "" },
+    fetch: (url) =>
+      url.endsWith("/v1/models")
+        ? { status: 200, headers: {}, bodyText: GATEWAY_BODY }
+        : new Error("ECONNREFUSED"),
+  });
+  const plugin = loadPlugin(pi);
+  await plugin.onLoad();
+  const before = calls.published.length;
+
+  const state = await plugin.onPanelInvoke("modelCatalog.refreshTargets", {});
+
+  assert.equal(state.targets.length, PINNED);
+  assert.ok(state.targets.every((entry) => entry.ok));
+  assert.ok(state.targets.every((entry) => entry.models.length === 2));
+  // One event for the whole pass, not one per row.
+  assert.equal(calls.published.length - before, 1);
+  assert.equal(calls.published.at(-1).payload.reason, "targets");
+});
+
+test("a failed row refresh keeps the models it already listed", async () => {
+  let healthy = true;
+  const { pi } = makePi({
+    settings: { gatewayPorts: "" },
+    fetch: (url) => {
+      if (url !== "http://127.0.0.1:7864/v1/models") return new Error("ECONNREFUSED");
+      return healthy
+        ? { status: 200, headers: {}, bodyText: GATEWAY_BODY }
+        : { status: 502, headers: {}, bodyText: "" };
+    },
+  });
+  const plugin = loadPlugin(pi);
+  await plugin.onLoad();
+
+  const ok = await plugin.onPanelInvoke("modelCatalog.refreshTarget", { providerId: "trae-cn" });
+  assert.equal(ok.target.ok, true);
+
+  healthy = false;
+  const failed = await plugin.onPanelInvoke("modelCatalog.refreshTarget", {
+    providerId: "trae-cn",
+  });
+  assert.equal(failed.target.ok, false);
+  assert.match(failed.target.error, /HTTP 502/);
+  // A stale list beats an empty one: the existing models are kept.
+  assert.equal(failed.target.models.length, 2);
+});
+
+test("a row with no key of its own still lists the models the host discovered", async () => {
+  // The regression this guards: the plugin's probe carries no credential, so a
+  // fresh process sees only "wants a key" for every row — while the host has
+  // already discovered each row's models. The view must show those.
+  const hostModels = [
+    { key: "x/wb-auto", providerId: "plugin:local.pi-model-accordion:workbuddy-cn", providerName: "WorkBuddy 国内版", modelId: "auto", label: "auto" },
+    { key: "x/wb-glm", providerId: "plugin:local.pi-model-accordion:workbuddy-cn", providerName: "WorkBuddy 国内版", modelId: "glm-5.3", label: "glm-5.3" },
+    { key: "x/trae-kimi", providerId: "plugin:local.pi-model-accordion:trae-cn", providerName: "Trae 国内版", modelId: "kimi-k3", label: "kimi-k3" },
+    // A row that is not pinned to this plugin must never leak into a target.
+    { key: "other/thing", providerId: "someone-else", providerName: "Other", modelId: "thing", label: "thing" },
+  ];
+  const { pi } = makePi({
+    settings: { gatewayPorts: "" },
+    models: hostModels,
+    // Keyless: every gateway refuses, exactly like a fresh process.
+    fetch: () => ({ status: 401, headers: {}, bodyText: "{}" }),
+  });
+  const plugin = loadPlugin(pi);
+  await plugin.onLoad();
+
+  const state = await plugin.onPanelInvoke("modelCatalog.state", {});
+  const byId = new Map(state.targets.map((entry) => [entry.providerId, entry]));
+
+  const workbuddy = byId.get("workbuddy-cn");
+  assert.equal(workbuddy.ok, false, "the plugin's own probe is keyless");
+  assert.equal(workbuddy.needsKey, true);
+  assert.deepEqual(
+    workbuddy.hostModels.map((model) => model.id).sort(),
+    ["auto", "glm-5.3"],
+  );
+
+  assert.deepEqual(byId.get("trae-cn").hostModels.map((model) => model.id), ["kimi-k3"]);
+
+  // Rows the host has nothing for stay empty rather than borrowing a neighbour's.
+  assert.deepEqual(byId.get("qoder-cn").hostModels, []);
+  assert.deepEqual(byId.get("qoder-intl").hostModels, []);
+
+  // No foreign provider's models leak into any pinned row.
+  for (const entry of state.targets) {
+    assert.ok(
+      entry.hostModels.every((model) => model.id !== "thing"),
+      `${entry.providerId} must not list another provider's models`,
+    );
+  }
+});
+
+test("refreshing one provider asks the host to rediscover exactly that row", async () => {
+  // The regression this guards: a keyless probe can never change a row's model
+  // list, so "refresh this provider" must reach the host's own rediscovery —
+  // `providers/listModels`, which runs the endpoint with the host's credential
+  // and writes the result back to the host's cache.
+  const discovered = [
+    { modelId: "glm-5.3", displayName: "glm-5.3" },
+    { modelId: "kimi-k3", displayName: "kimi-k3" },
+  ];
+  const { pi, calls } = makePi({
+    settings: { gatewayPorts: "" },
+    desktop: (input) => {
+      assert.equal(input.operation, "providers/listModels");
+      return { models: discovered, source: "remote" };
+    },
+    // The plugin's own probe still gets refused: it has no credential.
+    fetch: () => ({ status: 401, headers: {}, bodyText: "{}" }),
+  });
+  const plugin = loadPlugin(pi);
+  await plugin.onLoad();
+  calls.desktop.length = 0;
+
+  const answer = await plugin.onPanelInvoke("modelCatalog.refreshTarget", {
+    providerId: "trae-cn",
+  });
+
+  // Exactly one control call, addressed to this plugin's own row.
+  assert.equal(calls.desktop.length, 1);
+  assert.deepEqual(calls.desktop[0].args, [
+    { providerId: "plugin:local.pi-model-accordion:trae-cn" },
+  ]);
+
+  // The row now carries the host's freshly discovered list, and is not "locked"
+  // even though the keyless probe was refused.
+  assert.equal(answer.target.ok, true);
+  assert.equal(answer.target.needsKey, false);
+  assert.deepEqual(
+    answer.target.models.map((model) => model.id),
+    ["glm-5.3", "kimi-k3"],
+  );
+  assert.equal(answer.target.rediscoverError, null);
+});
+
+test("a row refresh still reports the row when the host cannot rediscover", async () => {
+  // A host without the control API must not turn the button into a crash: the
+  // row keeps its honest keyless answer and records why.
+  const { pi } = makePi({
+    settings: { gatewayPorts: "" },
+    desktop: () => new Error("desktop.control unavailable"),
+    fetch: () => ({ status: 401, headers: {}, bodyText: "{}" }),
+  });
+  const plugin = loadPlugin(pi);
+  await plugin.onLoad();
+
+  const answer = await plugin.onPanelInvoke("modelCatalog.refreshTarget", {
+    providerId: "workbuddy-cn",
+  });
+
+  assert.equal(answer.target.ok, false);
+  assert.equal(answer.target.needsKey, true);
+  assert.match(answer.target.rediscoverError, /desktop\.control unavailable/);
 });

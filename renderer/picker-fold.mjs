@@ -94,6 +94,21 @@ export function planClick({ groups, name, isOpen, multi = false, overrides }) {
 }
 
 /**
+ * Whether this picker should fold at all.
+ *
+ * The host draws the picker two ways. The classic layout lists every provider
+ * group in one scrolling pane, which is what folding is for. The railed layout
+ * (`data-rail="true"` on the pane's parent) draws the provider switcher itself
+ * and renders only the selected provider's group — folding there hides the one
+ * group the rail just selected, so picking any provider but the current model's
+ * leaves the pane blank. A lone provider group is the same story either way:
+ * there is nothing to fold against. Pure, like planFold.
+ */
+export function shouldFold({ groups, railed = false }) {
+  if (railed) return false;
+  return groups.filter((group) => !group.recent && group.id).length > 1;
+}
+/**
  * Mark the host's "recently used" section. It and the provider groups are both
  * role="group", so this reads the heading instead: a known "recently used"
  * string, or — for a locale not listed — the first group when every model it
@@ -142,8 +157,8 @@ export function installPickerFold(options = {}) {
     );
   }
 
-  function describe(list) {
-    const groups = [...list.querySelectorAll(GROUP_SELECTOR)].map((element) => {
+  function describe(root) {
+    const groups = [...root.querySelectorAll(GROUP_SELECTOR)].map((element) => {
       const labelElement = element.querySelector(LABEL_SELECTOR);
       const rows = [...element.querySelectorAll(ROW_SELECTOR)];
       return {
@@ -171,6 +186,13 @@ export function installPickerFold(options = {}) {
     if (query.trim() === "" && previousQuery !== "") overrides.clear();
     previousQuery = query;
     const groups = describe(list);
+    const railed = list.parentElement?.getAttribute?.("data-rail") === "true";
+    if (!shouldFold({ groups, railed })) {
+      // Nothing to fold here — undo any decoration a wider layout left behind,
+      // otherwise the rail's own provider switch stays blank.
+      undecorate(groups);
+      return;
+    }
     const open = planFold({ groups, query, overrides, collapsedByDefault });
     for (const group of groups) {
       const isOpen = open.get(group.id) !== false;
@@ -191,6 +213,19 @@ export function installPickerFold(options = {}) {
       }
       const glyph = isOpen ? "\u25be" : "\u25b8";
       if (chevron.textContent !== glyph) chevron.textContent = glyph;
+    }
+  }
+
+  /** Put the picker's own rows and headings back the way the host drew them. */
+  function undecorate(groups) {
+    for (const group of groups) {
+      for (const row of group.rows) {
+        if (row.style.display !== "") row.style.display = "";
+      }
+      if (!group.labelElement) continue;
+      group.labelElement.classList.remove(LABEL_CLASS);
+      group.labelElement.removeAttribute("aria-expanded");
+      group.labelElement.querySelector(`[${CHEVRON_ATTRIBUTE}]`)?.remove?.();
     }
   }
 
@@ -234,13 +269,6 @@ export function installPickerFold(options = {}) {
     doc.removeEventListener("input", schedule, true);
     observer.disconnect?.();
     style.remove?.();
-    for (const group of doc.querySelectorAll(GROUP_SELECTOR)) {
-      for (const row of group.querySelectorAll(ROW_SELECTOR)) row.style.display = "";
-      const labelElement = group.querySelector(LABEL_SELECTOR);
-      if (!labelElement) continue;
-      labelElement.classList.remove(LABEL_CLASS);
-      labelElement.removeAttribute("aria-expanded");
-      labelElement.querySelector(`[${CHEVRON_ATTRIBUTE}]`)?.remove?.();
-    }
+    undecorate(describe(doc));
   };
 }

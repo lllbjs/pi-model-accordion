@@ -25,6 +25,10 @@ const REFRESH_METHOD = "modelCatalog.refresh";
 const PICKER_FOLD_METHOD = "modelCatalog.pickerFold";
 const CREATE_KEY_CHANNEL = "modelCatalog.createKey";
 const COPY_KEY_CHANNEL = "modelCatalog.copyKey";
+const REFRESH_GATEWAY_CHANNEL = "modelCatalog.refreshGateway";
+const REFRESH_HOST_CHANNEL = "modelCatalog.refreshHost";
+const REFRESH_TARGET_CHANNEL = "modelCatalog.refreshTarget";
+const REFRESH_TARGETS_CHANNEL = "modelCatalog.refreshTargets";
 const DEFAULT_KEY_API_BASE = "http://127.0.0.1:9822";
 const TICK_MS = 60_000;
 const DEFAULT_AUTO_REFRESH_MINUTES = 10;
@@ -38,16 +42,25 @@ const COPY = {
     refreshFailed: (message) => `Model Catalog: refresh failed — ${message}`,
     refreshed: (host, gateways) =>
       `Model Catalog: ${host} host model(s), ${gateways} local gateway(s)`,
+    hostRefreshed: (models) => `Model Catalog: host catalog re-read — ${models} model(s)`,
+    targetsRefreshed: (ready, total, models) =>
+      `Model Catalog: ${ready}/${total} provider(s) answered, ${models} model(s)`,
   },
   "zh-CN": {
     openFailed: "模型列表：请先打开一个会话，再显示模型列表",
     refreshFailed: (message) => `模型列表：刷新失败 — ${message}`,
     refreshed: (host, gateways) => `模型列表：宿主 ${host} 个模型，本机网关 ${gateways} 个`,
+    hostRefreshed: (models) => `模型列表：已重读宿主目录 — ${models} 个模型`,
+    targetsRefreshed: (ready, total, models) =>
+      `模型列表：${ready}/${total} 项配置已应答，共 ${models} 个模型`,
   },
   "zh-TW": {
     openFailed: "模型列表：請先開啟一個工作階段，再顯示模型清單",
     refreshFailed: (message) => `模型列表：重新整理失敗 — ${message}`,
     refreshed: (host, gateways) => `模型列表：宿主 ${host} 個模型，本機閘道 ${gateways} 個`,
+    hostRefreshed: (models) => `模型列表：已重讀宿主目錄 — ${models} 個模型`,
+    targetsRefreshed: (ready, total, models) =>
+      `模型列表：${ready}/${total} 項設定已回應，共 ${models} 個模型`,
   },
 };
 
@@ -447,6 +460,331 @@ async function scanGateways(settings) {
   };
 }
 
+/** Publish after a targeted refresh, so a view open elsewhere still lands. */
+async function announce(reason) {
+  snapshot.updatedAt = new Date().toISOString();
+  await pi.bus.publish(UPDATED_TOPIC, {
+    reason,
+    count: snapshot.models.length,
+    gateways: snapshot.gateways.length,
+    locked: snapshot.gateways.filter((gateway) => gateway.needsKey).length,
+    gatewayModels: snapshot.gateways.reduce((total, item) => total + item.models.length, 0),
+    updatedAt: snapshot.updatedAt,
+  });
+}
+
+/**
+ * Re-probe one endpoint and leave every other one alone. This is the refresh a
+ * user asks for when one gateway came up late, went away, or a minted key just
+ * landed: no port scan, no host call, one request.
+ *
+ * The endpoint may be one the snapshot already lists or one the settings
+ * configure — a configured endpoint that was down at the last full scan is not
+ * in the snapshot at all, and that is exactly the case worth refreshing.
+ */
+async function refreshGateway(baseUrl, reason) {
+  const wanted = normalizeBase(baseUrl);
+  if (!wanted) throw new Error("Model Catalog: a gateway baseUrl is required");
+  const settings = await readSettings();
+  const index = snapshot.gateways.findIndex((gateway) => normalizeBase(gateway.baseUrl) === wanted);
+  const known = index >= 0 ? snapshot.gateways[index] : null;
+  const configured = settings.gatewayEndpoints.find((entry) => entry.baseUrl === wanted) ?? null;
+  if (!known && !configured) {
+    throw new Error(`Model Catalog: not a known gateway: ${wanted}`);
+  }
+  const candidate = {
+    label: known?.label ?? configured?.label ?? "",
+    named: Boolean(known?.named ?? known?.explicit ?? configured?.label),
+    baseUrl: wanted,
+    explicit: Boolean(known?.explicit ?? configured),
+  };
+  const refreshed = await probeGateway(candidate, settings.probeTimeoutMs);
+  // The same filter the full scan applies: a scanned port that answers nothing
+  // drops out, a configured one stays with its error.
+  const keep = refreshed.ok || refreshed.needsKey || refreshed.explicit;
+  if (index >= 0) {
+    if (keep) snapshot.gateways[index] = refreshed;
+    else snapshot.gateways.splice(index, 1);
+  } else if (keep) {
+    snapshot.gateways.push(refreshed);
+  }
+  await announce(reason);
+  return refreshed;
+}
+
+/**
+ * Re-read the host catalog only, and say nothing.
+ *
+ * Used right after a rediscovery: the host has just changed what it publishes,
+ * so the snapshot has to catch up before anything renders it. Publishing is the
+ * caller's job, so one refresh produces one event.
+ */
+async function refreshHostQuietly() {
+  const host = await readHostModels();
+  if (host.models) snapshot.models = host.models;
+  snapshot.hostError = host.error;
+  return snapshot.models.length;
+}
+
+/** Re-read the host catalog and publish, for the explicit re-read command. */
+async function refreshHost(reason) {
+  const models = await refreshHostQuietly();
+  await announce(reason);
+  return {
+    models,
+    hostError: snapshot.hostError,
+    rediscovery: "host-owned",
+  };
+}
+
+/**
+ * One configured provider row, refreshed on its own.
+ *
+ * The pinned rows are not 1:1 with endpoints: `qoder-cn` and `qoder-intl` share
+ * port 57895 and are told apart by their key's region, so refreshing "by
+ * endpoint" would merge rows a user needs kept apart. This is
+ * per configuration entry instead, each with the key minted for its own id.
+ */
+function targetById(providerId) {
+  const wanted = String(providerId ?? "");
+  return targetSnapshot().find((entry) => entry.providerId === wanted) ?? null;
+}
+
+/** The provider rows this plugin pins, in manifest order, never from settings. */
+function targetDefinitions() {
+  const rank = (providerId) => {
+    const at = PROVIDER_ORDER.indexOf(providerId);
+    return at < 0 ? PROVIDER_ORDER.length : at;
+  };
+  return [...KEY_TARGETS]
+    .sort((left, right) => rank(left.providerId) - rank(right.providerId))
+    .map((target) => ({
+      providerId: target.providerId,
+      name: target.name,
+      baseUrl: normalizeBase(target.baseUrl),
+      region: target.region,
+      namespace: target.namespace,
+    }));
+}
+
+/**
+ * Probe one pinned row's endpoint. With a key minted for that row the request
+ * carries it, so the region a key belongs to is what decides the answer; with
+ * no key the row still reports whether it is reachable and locked.
+ */
+async function probeTarget(definition, timeoutMs) {
+  const minted = createdKeys.get(definition.providerId) ?? null;
+  const base = {
+    ...definition,
+    hasKey: Boolean(minted),
+    ok: false,
+    needsKey: false,
+    error: null,
+    models: [],
+    checkedAt: new Date().toISOString(),
+  };
+  try {
+    const response = await pi.net.fetch({
+      url: `${definition.baseUrl}/models`,
+      method: "GET",
+      timeoutMs,
+      ...(minted ? { headers: { authorization: `Bearer ${minted}` } } : {}),
+    });
+    if (response.status === 401 || response.status === 403) {
+      // Locked: the row is reachable but this key (or no key) will not do.
+      return { ...base, needsKey: true };
+    }
+    if (response.status !== 200) {
+      return { ...base, error: `HTTP ${response.status}` };
+    }
+    const models = parseModelList(response.bodyText);
+    if (!models) return { ...base, error: "not an OpenAI model list" };
+    return { ...base, ok: true, models };
+  } catch (error) {
+    return { ...base, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** Last answer per pinned row; the view renders one list per entry from here. */
+const targetState = new Map();
+
+/** The manifest id, for matching the host's `plugin:<id>:<row>` provider ids. */
+function pluginId() {
+  // `getManifest` is the documented getter; `getId` is the older one, and the
+  // manifest this module is loaded from is the last resort.
+  const candidates = [
+    () => pi.plugin.getManifest()?.id,
+    () => pi.plugin.getId?.(),
+    () => pi.plugin.getManifest?.()?.id,
+  ];
+  for (const read of candidates) {
+    try {
+      const id = read();
+      if (typeof id === "string" && id) return id;
+    } catch {
+      // try the next source
+    }
+  }
+  return "";
+}
+
+/**
+ * The models the host already discovered, grouped by pinned row.
+ *
+ * The plugin's own probe carries no credential: the host owns the key slot, and
+ * `createdKeys` only ever holds a key minted during this session — so a fresh
+ * process can only report "reachable, wants a key". The host, though, has
+ * already discovered and cached every row's models once the user saved a key.
+ * Reading them back out of `pi.models.list()` is what turns this view from a
+ * list of locked endpoints into an actual model list.
+ */
+function hostModelsByTarget() {
+  const id = pluginId();
+  const prefix = `plugin:${id}:`;
+  const byTarget = new Map();
+  if (!id) return byTarget;
+  for (const model of snapshot.models) {
+    const providerId = String(model?.providerId ?? "");
+    if (!providerId.startsWith(prefix)) continue;
+    const targetId = providerId.slice(prefix.length);
+    if (!byTarget.has(targetId)) byTarget.set(targetId, []);
+    byTarget.get(targetId).push({
+      id: String(model.modelId ?? model.key ?? ""),
+      owner: null,
+    });
+  }
+  return byTarget;
+}
+
+function targetSnapshot() {
+  const hostModels = hostModelsByTarget();
+  return targetDefinitions().map((definition) => ({
+    ...definition,
+    hasKey: createdKeys.has(definition.providerId),
+    ok: false,
+    needsKey: false,
+    error: null,
+    models: [],
+    checkedAt: null,
+    ...(targetState.get(definition.providerId) ?? {}),
+    // The host's own discovery for this row, used when this process holds no
+    // key of its own to list them with.
+    hostModels: hostModels.get(definition.providerId) ?? [],
+  }));
+}
+
+/**
+ * Ask the host to rediscover one provider row's models.
+ *
+ * This is the only call that actually refreshes a row: `providers/listModels`
+ * runs the provider's own `/v1/models` request with the credential the host
+ * holds, then writes the result back through `providers.cacheModels`. The
+ * plugin's own `probeTarget` cannot do that — it has no credential, so it can
+ * only ever report "reachable, wants a key".
+ *
+ * `read` risk, so no confirmation prompt. The host addresses a plugin-declared
+ * row as `plugin:<pluginId>:<rowId>`, which is what `providerRef` builds.
+ */
+async function rediscoverTarget(providerId) {
+  if (typeof pi.desktop?.invoke !== "function") {
+    throw Object.assign(new Error("Model Catalog: this host exposes no desktop.control API"), {
+      code: "MODEL_CATALOG_NO_CONTROL_API",
+    });
+  }
+  const providerRef = `plugin:${pluginId()}:${providerId}`;
+  const answer = await pi.desktop.invoke({
+    operation: "providers/listModels",
+    args: [{ providerId: providerRef }],
+  });
+  const models = Array.isArray(answer?.models) ? answer.models : [];
+  return models
+    .map((model) => ({
+      id: String(model?.modelId ?? model?.id ?? ""),
+      owner: null,
+    }))
+    .filter((model) => model.id);
+}
+
+/**
+ * Refresh one pinned row and return just that row. A row that answers keeps its
+ * models; a row that fails keeps its previous models and reports the error, so a
+ * momentary 502 does not blank a list the user was reading.
+ *
+ * The host rediscovery runs first: it is the only path that can change what the
+ * host itself knows, so the row's list and the host picker move together.
+ */
+async function refreshTarget(providerId, reason) {
+  const definition = targetDefinitions().find((entry) => entry.providerId === String(providerId ?? ""));
+  if (!definition) {
+    throw Object.assign(new Error(`Model Catalog: unknown provider configuration: ${String(providerId)}`), {
+      code: "MODEL_CATALOG_UNKNOWN_TARGET",
+    });
+  }
+  const settings = await readSettings();
+  const previous = targetState.get(definition.providerId);
+
+  // Ask the host to rediscover; a host that cannot answer still leaves the
+  // plugin's own probe to report reachability.
+  let rediscovered = null;
+  let rediscoverError = null;
+  try {
+    rediscovered = await rediscoverTarget(definition.providerId);
+  } catch (error) {
+    rediscoverError = error instanceof Error ? error.message : String(error);
+  }
+
+  const fresh = await probeTarget(definition, settings.probeTimeoutMs);
+  const hostList = rediscovered && rediscovered.length > 0 ? rediscovered : null;
+  const kept =
+    hostList !== null
+      ? { ...fresh, ok: true, needsKey: false, models: hostList, rediscoverError }
+      : fresh.ok || !previous
+        ? { ...fresh, rediscoverError }
+        : { ...fresh, models: previous.models, rediscoverError };
+  targetState.set(definition.providerId, kept);
+  // Re-read the host catalog so `hostModels` reflects the new list immediately.
+  await refreshHostQuietly();
+  await announce(reason);
+  return kept;
+}
+
+/**
+ * Refresh every pinned row. `announceNow` is false when the caller is already
+ * publishing (startup, the timer, a full pull), so one refresh produces one
+ * event instead of two racing ones.
+ */
+async function refreshAllTargets(reason, announceNow = true) {
+  const settings = await readSettings();
+  const definitions = targetDefinitions();
+  const results = await Promise.all(
+    definitions.map(async (definition) => {
+      const previous = targetState.get(definition.providerId);
+      // Same order as the single-row refresh: host rediscovery first, then this
+      // process's own reachability probe.
+      let rediscovered = null;
+      let rediscoverError = null;
+      try {
+        rediscovered = await rediscoverTarget(definition.providerId);
+      } catch (error) {
+        rediscoverError = error instanceof Error ? error.message : String(error);
+      }
+      const fresh = await probeTarget(definition, settings.probeTimeoutMs);
+      const hostList = rediscovered && rediscovered.length > 0 ? rediscovered : null;
+      const kept =
+        hostList !== null
+          ? { ...fresh, ok: true, needsKey: false, models: hostList, rediscoverError }
+          : fresh.ok || !previous
+            ? { ...fresh, rediscoverError }
+            : { ...fresh, models: previous.models, rediscoverError };
+      targetState.set(definition.providerId, kept);
+      return kept;
+    }),
+  );
+  await refreshHostQuietly();
+  if (announceNow) await announce(reason);
+  return results;
+}
+
 function pull(reason) {
   if (inFlight) return inFlight;
   inFlight = (async () => {
@@ -473,16 +811,7 @@ function pull(reason) {
       snapshot.accounts = accounts.sources;
       snapshot.accountError = accounts.error ?? null;
       snapshot.probed = gateways.probed;
-      snapshot.updatedAt = new Date().toISOString();
-
-      await pi.bus.publish(UPDATED_TOPIC, {
-        reason,
-        count: snapshot.models.length,
-        gateways: snapshot.gateways.length,
-        locked: snapshot.gateways.filter((gateway) => gateway.needsKey).length,
-        gatewayModels: snapshot.gateways.reduce((total, item) => total + item.models.length, 0),
-        updatedAt: snapshot.updatedAt,
-      });
+      await announce(reason);
     } finally {
       inFlight = null;
     }
@@ -519,14 +848,17 @@ function providerEntry(label, baseUrl) {
  */
 const KEY_TARGETS = [
   { providerId: "workbuddy-cn", namespace: "gateway", baseUrl: "http://127.0.0.1:57891/v1", region: "cn", name: "pi-workbuddy-\u56fd\u5185\u7248" },
-  { providerId: "workbuddy-ai", namespace: "gateway", baseUrl: "http://127.0.0.1:57891/v1", region: "global", name: "pi-workbuddy-\u56fd\u9645\u7248" },
   { providerId: "trae-cn", namespace: "trae/gateway", baseUrl: "http://127.0.0.1:7864/v1", region: "cn", name: "pi-trae-\u56fd\u5185\u7248" },
-  { providerId: "trae-intl", namespace: "trae/gateway", baseUrl: "http://127.0.0.1:7864/v1", region: "global", name: "pi-trae-\u56fd\u9645\u7248" },
   { providerId: "qoder-cn", namespace: "qoder/gateway", baseUrl: "http://127.0.0.1:57895/v1", region: "cn", name: "pi-qoder-\u56fd\u5185\u7248" },
   { providerId: "qoder-intl", namespace: "qoder/gateway", baseUrl: "http://127.0.0.1:57895/v1", region: "global", name: "pi-qoder-\u56fd\u9645\u7248" },
-  { providerId: "kuku-gateway", namespace: "unified-gateway", baseUrl: "http://127.0.0.1:57896/v1", region: "cn", name: "pi-\u5e93\u5e93" },
-  { providerId: "raccoon-gateway", namespace: "unified-gateway", baseUrl: "http://127.0.0.1:57898/v1", region: "cn", name: "pi-\u6d63\u718a" },
 ];
+
+/**
+ * Manifest provider order, so the view lists the rows in the same order as
+ * Settings → Models. `KEY_TARGETS` is a ledger mapping; its order is not the
+ * presentation order, this is.
+ */
+const PROVIDER_ORDER = ["workbuddy-cn", "trae-cn", "qoder-cn", "qoder-intl"];
 
 /** Plaintext keys minted in this session — memory only, never persisted. */
 const createdKeys = new Map();
@@ -597,6 +929,8 @@ async function report() {
     updatedAt: snapshot.updatedAt,
     refreshing: inFlight !== null,
     settings: await readSettings(),
+    // One entry per pinned provider row, each with its own key, status and list.
+    targets: targetSnapshot(),
     keyTargets: KEY_TARGETS.map(({ providerId, region, name }) => ({ providerId, region, name })),
     created: [...createdKeys.keys()],
   };
@@ -607,7 +941,9 @@ async function tick() {
   const { autoRefreshMinutes } = await readSettings();
   if (autoRefreshMinutes <= 0) return;
   const last = snapshot.updatedAt ? Date.parse(snapshot.updatedAt) : 0;
-  if (Date.now() - last >= autoRefreshMinutes * 60_000) await pull("auto");
+  if (Date.now() - last >= autoRefreshMinutes * 60_000) {
+    await Promise.all([pull("auto"), refreshAllTargets("auto", false)]);
+  }
 }
 
 async function onLoad() {
@@ -639,8 +975,44 @@ async function onLoad() {
     },
   });
 
+  // The host owns provider rediscovery, so this command is honest about what
+  // it does: it re-reads the catalog the host already publishes.
+  await pi.commands.register({
+    id: "modelCatalog.refreshHost",
+    title: "Model Catalog: Re-read the host catalog",
+    keywords: ["model", "models", "host", "catalog", "模型", "宿主"],
+    run: async () => {
+      const strings = await copy();
+      const answer = await refreshHost("command");
+      if (answer.hostError) {
+        await pi.ui.showToast(strings.refreshFailed(answer.hostError), "error");
+        return;
+      }
+      await pi.ui.showToast(strings.hostRefreshed(answer.models), "info");
+    },
+  });
+
+  // Every pinned row in one go. Still one request per row, each with its own
+  // key, so "refresh all" never collapses the regional pairs into one answer.
+  await pi.commands.register({
+    id: "modelCatalog.refreshTargets",
+    title: "Model Catalog: Refresh every configured provider",
+    keywords: ["model", "models", "refresh", "provider", "配置", "刷新"],
+    run: async () => {
+      const strings = await copy();
+      const results = await refreshAllTargets("command");
+      const ready = results.filter((entry) => entry.ok);
+      const models = ready.reduce((total, entry) => total + entry.models.length, 0);
+      await pi.ui.showToast(strings.targetsRefreshed(ready.length, results.length, models), "info");
+    },
+  });
+
   const settings = await readSettings();
-  if (settings.refreshOnStartup) await pull("startup");
+  if (settings.refreshOnStartup) {
+    // The pinned rows are probed alongside the pull so the view's per-provider
+    // lists are populated on the first render, not on the first click.
+    await Promise.all([pull("startup"), refreshAllTargets("startup", false)]);
+  }
 
   pi.services.register({
     id: "autoRefresh",
@@ -662,6 +1034,8 @@ async function onUnload() {
   ticker = undefined;
   await pi.commands.unregister("modelCatalog.open");
   await pi.commands.unregister("modelCatalog.refresh");
+  await pi.commands.unregister("modelCatalog.refreshHost");
+  await pi.commands.unregister("modelCatalog.refreshTargets");
 }
 
 module.exports = {
@@ -695,9 +1069,27 @@ module.exports = {
   async onPanelInvoke(channel, payload) {
     if (channel === STATE_CHANNEL) return report();
     if (channel === REFRESH_CHANNEL) {
-      await pull("view");
+      // A full refresh covers the pinned rows too, with a single event.
+      await Promise.all([pull("view"), refreshAllTargets("view", false)]);
       return report();
     }
+
+    if (channel === REFRESH_GATEWAY_CHANNEL) {
+      await refreshGateway(payload?.baseUrl, "gateway");
+      return report();
+    }
+
+    // Per-configuration refresh and list read. `providerId` is the pinned row,
+    // not an endpoint, so two rows sharing one port stay independent.
+    if (channel === REFRESH_TARGET_CHANNEL) {
+      const target = await refreshTarget(payload?.providerId, "target");
+      return { target, state: await report() };
+    }
+    if (channel === REFRESH_TARGETS_CHANNEL) {
+      await refreshAllTargets("targets");
+      return report();
+    }
+    if (channel === REFRESH_HOST_CHANNEL) return refreshHost("host");
     if (channel === CREATE_KEY_CHANNEL) return createKey(await readSettings(), payload);
     if (channel === COPY_KEY_CHANNEL) {
       await pi.clipboard.writeText(String(payload?.key ?? ""));

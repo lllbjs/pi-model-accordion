@@ -22,14 +22,19 @@ work-panel view, grouped and collapsible.
 | Providers | Pinned rows for the loopback gateways verified on this machine, so their models can reach the host picker (see below) |
 | Settings | `refreshOnStartup`, `autoRefreshMinutes` (default 10, `0` disables), `groupByProvider`, `gatewayEndpoints`, `gatewayPorts`, `probeTimeoutMs` |
 | Service | `autoRefresh` — resident timer that re-pulls both sources on the interval |
+| Refresh | **Per configured provider** in the view — each row has its own Refresh and its own model list — plus **Re-read host catalog**, per-endpoint refresh, and `modelCatalog.refreshTargets` in the command palette |
 | Bus | publishes `local.pi-model-accordion.updated` after every pull (`locked` counts gateways that need a key) |
 
 ## Permissions
 
 `ui.view`, `models.list`, `net.fetch`, `clipboard.write`, `background.service`,
-`bus.publish`, `renderer.extension`, `provider.register`. No filesystem access
-and no credential handling — a gateway that wants a key gets one from the user
-in Settings, never from this plugin.
+`bus.publish`, `renderer.extension`, `provider.register`, `desktop.control`. No
+filesystem access and no credential handling — a gateway that wants a key gets
+one from the user in Settings, never from this plugin.
+
+`desktop.control` is what makes the per-row refresh real: it reaches the host's
+`providers/listModels`, which runs the endpoint with the credential **the host**
+holds. The plugin never sees that credential.
 
 ## Local gateway discovery
 
@@ -47,9 +52,10 @@ Candidates come from two places:
   `Label=http://127.0.0.1:PORT/v1` (a bare URL works too). The label you write
   is kept as-is.
 - **Scanned ports** — `gatewayPorts` (default
-  `1234,3000,5000,7864,8000,8080,8081,8787,8790,9000,11434,57891,57898`; the
-  last three are the gateways verified on this machine, so they are found with
-  no configuration at all; `8787-8799` ranges are accepted, up to 64 endpoints). An endpoint with no label gets one from its own
+  `1234,3000,5000,7864,8000,8080,8081,8787,8790,9000,11434,57891,57895`; the
+  last two are the gateways verified on this machine, so they are found with
+  no configuration at all; `8787-8799` ranges are accepted, up to 64 endpoints).
+  An endpoint with no label gets one from its own
   `/healthz` `service` field when it reports one, so a scanned port can show up
   as `trae-gateway` instead of `127.0.0.1:7864`.
 
@@ -69,9 +75,10 @@ This manifest pins the gateways verified on this machine:
 
 | Row | Endpoint | How it was identified |
 |---|---|---|
-| `workbuddy` | `http://127.0.0.1:57891/v1` | Confirmed by the machine's owner; its `/healthz` reports the same cn+global region pair as the WorkBuddy connector |
-| `trae-gateway` | `http://127.0.0.1:7864/v1` | `/healthz` reports `service: "trae-gateway"` |
-| `raccoon-gateway` | `http://127.0.0.1:57898/v1` | `/healthz` reports `service: "raccoon-gateway"` |
+| `workbuddy-cn` | `http://127.0.0.1:57891/v1` | `/healthz` reports the cn+global region pair; the cn row is pinned |
+| `trae-cn` | `http://127.0.0.1:7864/v1` | `/healthz` reports `service: "trae-gateway"` |
+| `qoder-cn` | `http://127.0.0.1:57895/v1` | Qoder's cn realm |
+| `qoder-intl` | `http://127.0.0.1:57895/v1` | Qoder's global realm — same port, told apart by the key's region |
 
 A pinned row is a static endpoint: if a gateway moves to another port, update
 `baseUrl` here (or delete the row and copy a fresh entry from the view).
@@ -113,6 +120,61 @@ a plugin limitation.
 - **The identity probe is one extra request.** `/healthz` is only read for an
   endpoint that has no user-supplied label and did not answer with a model list.
 
+## Refreshing, and where it stops
+
+Five refresh paths, each with the narrowest reach that still does the job:
+
+| Path | Reach | Cost |
+|---|---|---|
+| Full **Refresh** (button, `modelCatalog.refresh`, `modelCatalog.refresh` renderer call) | host catalog + every candidate endpoint + account sources + every pinned row | one probe per endpoint and per row |
+| Per-gateway **Refresh** (view button, panel channel `modelCatalog.refreshGateway`) | that one endpoint | one `/v1/models` request (plus the `/healthz` identity probe when an unnamed endpoint stops answering) |
+| **Per configured provider** (view row button, panel channel `modelCatalog.refreshTarget`) | that one provider row, rediscovered by the host | one `providers/listModels` control call + one reachability probe |
+| **Refresh every configured provider** (view button, `modelCatalog.refreshTargets`) | every pinned row, each still on its own | one control call per row, one event |
+| **Re-read host catalog** (header button, node command `modelCatalog.refreshHost`) | `pi.models.list()` only | one host read, no endpoint probed |
+
+The per-gateway refresh re-probes an endpoint the snapshot lists **or** one
+`gatewayEndpoints` configures — the second case matters because an endpoint that
+was down at the last full scan is not in the snapshot at all. A configured
+endpoint that is still down stays in the list with its error; a scanned port
+that answers nothing drops out, exactly as a full scan leaves it.
+
+The per-provider refresh is per **configuration entry**, never per endpoint, and
+that distinction is load-bearing: `qoder-cn` and `qoder-intl` share port 57895
+and are told apart only by their key's region, so an endpoint-level refresh
+would merge two rows a user needs kept apart. Each row sends the key minted for
+its own id, keeps its own model list, and keeps its own status line. A row that
+fails keeps the models it already listed — a stale list beats an empty one.
+
+**The model list itself comes from the host.** The plugin's own probe carries no
+credential — the host owns the key slot, and a key minted here lives only in
+memory — so a fresh process can only report "reachable, wants a key". What the
+view lists per row is therefore `pi.models.list()` filtered to this plugin's own
+provider rows (`plugin:<id>:<row>`), which is exactly what the host discovered
+after the user saved each row's key. The row's status line says so
+("Host discovered N model(s)"), and the plugin's own probe only takes over once
+it holds a key of its own.
+
+**Refreshing a row is a host rediscovery, not a probe.** The per-row button and
+`modelCatalog.refreshTargets` call the host's `providers/listModels` through
+`pi.desktop.invoke`, addressed to this plugin's own row
+(`plugin:<id>:<row>`). That call runs the endpoint with the credential the host
+holds and writes the result back through `providers.cacheModels`, so the row's
+list and the host picker change together — which is exactly what the plugin's
+own keyless probe can never do. The probe still runs, to report reachability and
+to catch a key that the host's copy does not have; when the two disagree, the
+host's list wins because it is the one that is actually authenticated.
+
+**When the host will not rediscover** (no `desktop.control` grant, an older
+host, a provider whose key was never saved) the row keeps its honest keyless
+answer and the status line says why (`Host rediscovery failed: …`). Nothing is
+silently blanked.
+
+`modelCatalog.refreshHost` stays a plain re-read of `pi.models.list()`, because
+re-reading the catalog and rediscovering a provider are different jobs.
+
+- **The identity probe is one extra request.** `/healthz` is only read for an
+  endpoint that has no user-supplied label and did not answer with a model list.
+
 ## Localization
 
 The view, the toasts and the composer control ship in English, Simplified
@@ -144,8 +206,14 @@ The host's own model picker folds by provider. No renderer slot reaches inside
 that picker, so the plugin decorates its DOM — the same approach the DSH plugin
 this was ported from uses. See `renderer/picker-fold.mjs`.
 
-- Provider groups start folded; the provider holding the current model opens
-  with the menu.
+- Folding only happens on the classic layout, where every provider group is in
+  one scrolling pane. The host's newer picker puts a provider rail on the left
+  (`data-rail="true"`) and renders just the selected provider's group; there the
+  plugin leaves the DOM alone, because folding would hide the group the rail had
+  just switched to — every provider but the current model's would come up empty.
+  A single provider group is skipped for the same reason.
+- On the classic layout: provider groups start folded; the provider holding the
+  current model opens with the menu.
 - Clicking a provider's heading opens it and closes the others (an accordion);
   `Ctrl`/`Cmd`-click toggles one and leaves the others alone.
 - Typing in the search box unfolds everything; clearing it folds back to the

@@ -98,7 +98,8 @@
         font: inherit;
         color: inherit;
       }
-      #refresh {
+      #refresh,
+      #refresh-host {
         padding: 5px 10px;
         border: 1px solid var(--line);
         border-radius: 6px;
@@ -106,10 +107,12 @@
         cursor: pointer;
         white-space: nowrap;
       }
-      #refresh:hover:not(:disabled) {
+      #refresh:hover:not(:disabled),
+      #refresh-host:hover:not(:disabled) {
         background: var(--hover);
       }
-      #refresh:disabled {
+      #refresh:disabled,
+      #refresh-host:disabled {
         color: var(--muted);
         cursor: default;
       }
@@ -246,6 +249,50 @@
         overflow: hidden;
         clip: rect(0 0 0 0);
       }
+      .target-row {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 6px;
+        padding: 5px 6px;
+        border-radius: 6px;
+      }
+      .target-row:hover {
+        background: var(--hover);
+      }
+      .target-actions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-left: auto;
+      }
+      .target-actions button {
+        padding: 3px 8px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: transparent;
+        font-size: 12px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .target-actions button:hover:not(:disabled) {
+        background: var(--hover);
+      }
+      .target-actions button:disabled {
+        color: var(--muted);
+        cursor: default;
+      }
+      .target-status {
+        color: var(--muted);
+        font-size: 11px;
+        white-space: nowrap;
+      }
+      .target-models {
+        padding: 0 0 4px 16px;
+      }
+      .target-models .model {
+        padding: 2px 6px;
+      }
     </style>
   </head>
   <body>
@@ -256,6 +303,7 @@
       </div>
       <div class="controls">
         <input id="search" type="search" autocomplete="off" spellcheck="false" />
+        <button id="refresh-host" type="button">Refresh host</button>
         <button id="refresh" type="button">Refresh</button>
       </div>
     </header>
@@ -294,11 +342,16 @@
           copyEntry: "Copy provider entry",
           copied: "Copied ✓",
           copyFailed: "Copy failed",
+          refreshFailed: "Refresh failed",
           defaultChip: "default",
           reasoningChip: "reasoning",
           subagentChip: "subagents",
           aliasChip: "alias",
           thinkingChip: "thinking",
+          refreshGateway: "Refresh",
+          refreshingGateway: "Refreshing…",
+          refreshHost: "Re-read host catalog",
+          hostRefreshed: (count) => `Host catalog re-read: ${count} model(s)`,
         },
         "zh-CN": {
           title: "模型列表",
@@ -323,11 +376,16 @@
           copyEntry: "复制 provider 声明",
           copied: "已复制 ✓",
           copyFailed: "复制失败",
+          refreshFailed: "刷新失败",
           defaultChip: "默认",
           reasoningChip: "推理",
           subagentChip: "子代理",
           aliasChip: "别名",
           thinkingChip: "思考",
+          refreshGateway: "刷新",
+          refreshingGateway: "刷新中…",
+          refreshHost: "重读宿主目录",
+          hostRefreshed: (count) => `已重读宿主目录：${count} 个模型`,
         },
         "zh-TW": {
           title: "模型列表",
@@ -352,10 +410,15 @@
           copyEntry: "複製 provider 宣告",
           copied: "已複製 ✓",
           copyFailed: "複製失敗",
+          refreshFailed: "重新整理失敗",
           defaultChip: "預設",
           reasoningChip: "推理",
           subagentChip: "子代理",
           aliasChip: "別名",
+          refreshGateway: "重新整理",
+          refreshingGateway: "重新整理中…",
+          refreshHost: "重讀宿主目錄",
+          hostRefreshed: (count) => `已重讀宿主目錄：${count} 個模型`,
           thinkingChip: "思考",
         },
       };
@@ -375,10 +438,14 @@
         gateways: [],
         gatewayError: null,
         accounts: [],
+        targets: [],
+        targetsRefreshing: false,
         accountError: null,
         probed: 0,
         updatedAt: null,
         refreshing: false,
+        hostRefreshing: false,
+        hostNotice: null,
         settings: { groupByProvider: true, autoRefreshMinutes: 10, refreshOnStartup: true },
         query: "",
         collapsed: new Set(),
@@ -517,6 +584,36 @@
           }, 1500);
         });
         row.append(button);
+
+        // Refresh just this endpoint: the others are untouched, so a gateway
+        // that came up late does not force a full port scan.
+        const refreshButton = document.createElement("button");
+        refreshButton.type = "button";
+        refreshButton.dataset.action = "refresh-gateway";
+        refreshButton.textContent = T.refreshGateway;
+        refreshButton.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          if (refreshButton.disabled) return;
+          refreshButton.disabled = true;
+          refreshButton.textContent = T.refreshingGateway;
+          try {
+            const next = await bridge.invoke("modelCatalog.refreshGateway", {
+              baseUrl: gateway.baseUrl,
+            });
+            if (next && typeof next === "object") Object.assign(state, next);
+            render();
+            return;
+          } catch (error) {
+            refreshButton.textContent = T.refreshFailed;
+            refreshButton.title = String((error && error.message) || error);
+          } finally {
+            refreshButton.disabled = false;
+          }
+          window.setTimeout(() => {
+            refreshButton.textContent = T.refreshGateway;
+          }, 1500);
+        });
+        row.append(refreshButton);
         return row;
       }
 
@@ -640,34 +737,79 @@
 
       const KEY_COPY = {
         "zh-CN": {
-          title: "API \u5bc6\u94a5",
-          hint: (n) => `\u901a\u8fc7 DaddySuite \u5bc6\u94a5\u53f0\u8d26\u521b\u5efa\uff0c\u540d\u5b57\u5f62\u5982 pi-workbuddy-\u56fd\u5185\u7248\uff08\u5171 ${n} \u6761\uff09\u3002`,
+          title: "\u914d\u7f6e\u9879\u4e0e\u6a21\u578b\u5217\u8868",
+          hint: (n) =>
+            `\u6bcf\u4e00\u9879\u914d\u7f6e\u72ec\u7acb\u5237\u65b0\u3001\u72ec\u7acb\u5217\u51fa\u6a21\u578b\uff08\u5171 ${n} \u9879\uff09\u3002\u540c\u4e00\u7aef\u53e3\u3001\u4e0d\u540c\u533a\u57df\u7684\u914d\u7f6e\u4e92\u4e0d\u5f71\u54cd\u3002`,
+          refreshAll: "\u5168\u90e8\u5237\u65b0",
           create: "\u521b\u5efa",
           copy: "\u590d\u5236",
           copied: "\u5df2\u590d\u5236",
           created: (name) => `\u5df2\u521b\u5efa ${name}\uff0c\u5e76\u5df2\u81ea\u52a8\u590d\u5236\u5230\u526a\u8d34\u677f\uff1b\u5230 \u8bbe\u7f6e \u2192 \u6a21\u578b \u91cc\u7c98\u8d34\u7ed9\u5bf9\u5e94 provider\u3002`,
           failed: (why) => `\u521b\u5efa\u5931\u8d25\uff1a${why}`,
           note: "\u63d2\u4ef6\u4e0d\u80fd\u5199\u5bbf\u4e3b\u7684\u5bc6\u94a5\u69fd\uff0c\u6700\u540e\u4e00\u6b65\u4ecd\u9700\u4f60\u7c98\u8d34\uff1b\u91cd\u590d\u70b9\u300c\u521b\u5efa\u300d\u4f1a\u5efa\u51fa\u540c\u540d\u7684\u65b0\u5bc6\u94a5\u3002",
+          refresh: "刷新本项",
+          refreshing: "刷新中…",
+          refreshFailed: "刷新失败",
+          ready: (n) => `已应答 · ${n} 个模型`,
+          hostReady: (n) => `宿主已发现 ${n} 个模型`,
+          locked: "可达，但需要密钥",
+          keyRejected: "密钥被拒绝（区域不符？）",
+          failedShort: (why) => `失败：${why}`,
+          unchecked: "尚未检查",
+          rediscoverFailed: (why) => `宿主重新发现失败：${why}`,
+          recreate: "重建密钥",
+          createHint: "在 DaddySuite 密钥台账里为这一项新建密钥",
+          hostList: "宿主目录中的模型",
         },
         "zh-TW": {
-          title: "API \u91d1\u9470",
-          hint: (n) => `\u900f\u904e DaddySuite \u91d1\u9470\u53f0\u5e33\u5efa\u7acb\uff0c\u540d\u7a31\u5f62\u5982 pi-workbuddy-\u570b\u5167\u7248\uff08\u5171 ${n} \u689d\uff09\u3002`,
+          title: "\u914d\u7f6e\u9805\u8207\u6a21\u578b\u6e05\u55ae",
+          hint: (n) =>
+            `\u6bcf\u4e00\u9805\u8a2d\u5b9a\u7368\u7acb\u91cd\u65b0\u6574\u7406\u3001\u7368\u7acb\u5217\u51fa\u6a21\u578b\uff08\u5171 ${n} \u9805\uff09\u3002\u540c\u4e00\u7aef\u53e3\u3001\u4e0d\u540c\u5340\u57df\u7684\u8a2d\u5b9a\u4e92\u4e0d\u5f71\u97ff\u3002`,
+          refreshAll: "\u5168\u90e8\u91cd\u65b0\u6574\u7406",
           create: "\u5efa\u7acb",
           copy: "\u8907\u88fd",
           copied: "\u5df2\u8907\u88fd",
           created: (name) => `\u5df2\u5efa\u7acb ${name}\uff0c\u8907\u88fd\u5f8c\u5230 \u8a2d\u5b9a \u2192 \u6a21\u578b \u88e1\u8cbc\u4e0a\u5c0d\u61c9 provider\u3002`,
           failed: (why) => `\u5efa\u7acb\u5931\u6557\uff1a${why}`,
+          refresh: "重新整理本項",
+          refreshing: "重新整理中…",
+          refreshFailed: "重新整理失敗",
+          ready: (n) => `已回應 · ${n} 個模型`,
+          hostReady: (n) => `宿主已發現 ${n} 個模型`,
+          locked: "可達，但需要金鑰",
+          keyRejected: "金鑰被拒絕（區域不符？）",
+          failedShort: (why) => `失敗：${why}`,
+          unchecked: "尚未檢查",
+          rediscoverFailed: (why) => `宿主重新發現失敗：${why}`,
+          recreate: "重建金鑰",
+          createHint: "在 DaddySuite 金鑰台帳裡為這一項建立新金鑰",
+          hostList: "宿主目錄中的模型",
           note: "\u5916\u639b\u4e0d\u80fd\u5beb\u5bbf\u4e3b\u7684\u91d1\u9470\u69fd\uff0c\u6700\u5f8c\u4e00\u6b65\u4ecd\u9700\u4f60\u8cbc\u4e0a\uff1b\u91cd\u8907\u9ede\u300c\u5efa\u7acb\u300d\u6703\u5efa\u51fa\u540c\u540d\u7684\u65b0\u91d1\u9470\u3002",
         },
         en: {
-          title: "API keys",
-          hint: (n) => `Created through the DaddySuite key ledger, named like pi-workbuddy-cn (${n} targets).`,
+          title: "Configured providers",
+          hint: (n) =>
+            `Each entry refreshes and lists its own models (${n} entries). Entries sharing a port but not a region stay independent.`,
+          refreshAll: "Refresh all",
           create: "Create",
           copy: "Copy",
           copied: "Copied",
           created: (name) => `Created ${name}. Copy it and paste it into the matching provider in Settings \u2192 Models.`,
           failed: (why) => `Create failed: ${why}`,
           note: "A plugin cannot write the host's key slot, so the last step is still a paste; clicking Create again mints another key with the same name.",
+          refresh: "Refresh",
+          refreshing: "Refreshing…",
+          refreshFailed: "Refresh failed",
+          ready: (n) => `Answered · ${n} model(s)`,
+          hostReady: (n) => `Host discovered ${n} model(s)`,
+          locked: "Reachable, wants a key",
+          keyRejected: "Key rejected (wrong region?)",
+          failedShort: (why) => `Failed: ${why}`,
+          unchecked: "Not checked yet",
+          rediscoverFailed: (why) => `Host rediscovery failed: ${why}`,
+          recreate: "New key",
+          createHint: "Mint a key for this entry in the DaddySuite ledger",
+          hostList: "Models in the host catalog",
         },
       };
 
@@ -680,19 +822,87 @@
 
       function keySection() {
         const K = keyCopy();
-        const targets = state.keyTargets ?? [];
+        const targets = state.targets ?? [];
         const node = document.createElement("section");
         const heading = document.createElement("h2");
         heading.textContent = K.title;
         node.append(heading);
         node.append(text(K.hint(targets.length), "section-hint"));
+
+        // One control for every entry: still one request per entry, each with
+        // its own key, so a shared port is never collapsed into one answer.
+        const bulk = document.createElement("button");
+        bulk.type = "button";
+        bulk.dataset.action = "refresh-targets";
+        bulk.textContent = state.targetsRefreshing ? K.refreshing : K.refreshAll;
+        bulk.disabled = state.targetsRefreshing === true;
+        bulk.addEventListener("click", async () => {
+          if (state.targetsRefreshing) return;
+          state.targetsRefreshing = true;
+          render();
+          try {
+            const next = await bridge.invoke("modelCatalog.refreshTargets", {});
+            if (next && typeof next === "object") Object.assign(state, next);
+          } catch (error) {
+            state.hostError = String((error && error.message) || error);
+          } finally {
+            state.targetsRefreshing = false;
+          }
+          render();
+        });
+        node.append(bulk);
+
+        // One row per configured provider, each with its own refresh and its own
+        // model list. It is per configuration entry, not per endpoint: the
+        // regional pairs share a port and are told apart by their key.
         for (const target of targets) {
           const row = document.createElement("div");
-          row.className = "model";
+          row.className = "target-row";
+          row.dataset.providerId = target.providerId;
+
           row.append(text(target.name, "model-label"));
+          row.append(chip(target.region));
+
+          const status = document.createElement("span");
+          status.className = "target-status";
+          status.textContent = targetStatusText(target, K);
+          row.append(status);
+
+          const actions = document.createElement("div");
+          actions.className = "target-actions";
+
+          // Refresh only this entry's endpoint, with only this entry's key.
+          const refreshButton = document.createElement("button");
+          refreshButton.type = "button";
+          refreshButton.dataset.action = "refresh-target";
+          refreshButton.textContent = K.refresh;
+          refreshButton.addEventListener("click", async () => {
+            if (refreshButton.disabled) return;
+            refreshButton.disabled = true;
+            refreshButton.textContent = K.refreshing;
+            try {
+              const answer = await bridge.invoke("modelCatalog.refreshTarget", {
+                providerId: target.providerId,
+              });
+              if (answer?.state) Object.assign(state, answer.state);
+              render();
+              return;
+            } catch (error) {
+              refreshButton.textContent = K.refreshFailed;
+              refreshButton.title = String((error && error.message) || error);
+            } finally {
+              refreshButton.disabled = false;
+            }
+            window.setTimeout(() => {
+              refreshButton.textContent = K.refresh;
+            }, 1500);
+          });
+          actions.append(refreshButton);
+
           const button = document.createElement("button");
           button.type = "button";
-          button.textContent = K.create;
+          button.textContent = target.hasKey ? K.recreate : K.create;
+          button.title = K.createHint;
           button.addEventListener("click", async () => {
             button.disabled = true;
             try {
@@ -707,7 +917,7 @@
                 await bridge.invoke("modelCatalog.copyKey", { key: created.key });
                 copyButton.textContent = K.copied;
               });
-              row.append(copyButton);
+              actions.append(copyButton);
               const code = document.createElement("code");
               code.textContent = created.key;
               row.append(code);
@@ -717,11 +927,51 @@
               button.disabled = false;
             }
           });
-          row.append(button);
+          actions.append(button);
+          row.append(actions);
           node.append(row);
+
+          // The list itself: this process's own answer when it has a key, and
+          // otherwise the models the host already discovered for this row.
+          const hostList = Array.isArray(target.hostModels) ? target.hostModels : [];
+          const shown = target.ok && target.models.length > 0 ? target.models : hostList;
+          if (shown.length > 0) {
+            const list = document.createElement("div");
+            list.className = "target-models";
+            for (const model of shown) {
+              const item = document.createElement("article");
+              item.className = "model";
+              const top = document.createElement("div");
+              top.className = "model-top";
+              top.append(text(model.id, "model-label"));
+              if (model.owner) top.append(chip(model.owner));
+              item.append(top);
+              list.append(item);
+            }
+            node.append(list);
+          }
         }
         node.append(text(K.note, "section-hint"));
         return node;
+      }
+
+      /** One line of plain truth about a configured provider row. */
+      function targetStatusText(target, K) {
+        const hostCount = Array.isArray(target.hostModels) ? target.hostModels.length : 0;
+        if (target.ok) {
+          // A rediscovery that failed still leaves the row's own answer; say so
+          // rather than hiding the reason behind a green status.
+          return target.rediscoverError
+            ? `${K.ready(target.models.length)} · ${K.rediscoverFailed(target.rediscoverError)}`
+            : K.ready(target.models.length);
+        }
+        // The host already discovered this row's models: that is the real
+        // answer, and it outranks this process's keyless probe.
+        if (hostCount > 0) return K.hostReady(hostCount);
+        if (target.rediscoverError) return K.rediscoverFailed(target.rediscoverError);
+        if (target.needsKey) return target.hasKey ? K.keyRejected : K.locked;
+        if (target.error) return K.failedShort(target.error);
+        return K.unchecked;
       }
 
       function render() {
@@ -731,6 +981,9 @@
         $("search").setAttribute("aria-label", T.search);
         $("refresh").textContent = state.refreshing ? T.refreshing : T.refresh;
         $("refresh").disabled = state.refreshing;
+        const hostButton = $("refresh-host");
+        hostButton.textContent = state.hostRefreshing ? T.refreshingGateway : T.refreshHost;
+        hostButton.disabled = state.hostRefreshing === true;
         $("empty").textContent = T.empty;
 
         const query = state.query.trim().toLowerCase();
@@ -755,7 +1008,7 @@
         const list = $("list");
         list.replaceChildren();
 
-        const hostSection = section("hostTitle");
+        const hostSection = section("hostTitle", state.hostNotice ? T.hostRefreshed(state.hostNotice) : null);
         const groups = state.settings.groupByProvider
           ? hostGroups(hostModels)
           : [{ key: "host:all", name: T.hostTitle, models: hostModels }];
@@ -833,7 +1086,29 @@
         render();
       });
       $("refresh").addEventListener("click", () => {
+        // A full pull replaces the catalog, so the re-read hint no longer applies.
+        state.hostNotice = null;
         void load(true);
+      });
+      // Re-read only the host catalog. The host owns provider rediscovery, so
+      // this reports what the host already publishes — never a fake refresh.
+      $("refresh-host").addEventListener("click", async () => {
+        if (state.hostRefreshing) return;
+        state.hostRefreshing = true;
+        render();
+        try {
+          const answer = await bridge.invoke("modelCatalog.refreshHost", {});
+          if (answer && typeof answer === "object") {
+            state.hostNotice = Number(answer.models) || 0;
+            if (answer.hostError) state.hostError = String(answer.hostError);
+          }
+          await load(false);
+        } catch (error) {
+          state.hostError = String((error && error.message) || error);
+        } finally {
+          state.hostRefreshing = false;
+        }
+        render();
       });
       document.addEventListener("visibilitychange", () => {
         if (document.visibilityState === "visible") void load(false);
